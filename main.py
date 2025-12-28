@@ -12,7 +12,11 @@ from src.data.collate import collate_fn_pad
 from src.training.trainer import train_model 
 from src.training.loss import causal_loss_fn
 from src.training.curriculum import CurriculumManager
-from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+try:
+    from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
 
 def setup_ddp():
     if "LOCAL_RANK" in os.environ:
@@ -107,19 +111,22 @@ def main():
         # Progress Bar (Only on Master)
         progress = None
         if is_master:
-            progress = Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                TimeRemainingColumn(),
-                TextColumn("[magenta]{task.fields[metrics]}")
-            )
-            task_id = progress.add_task(
-                f"[cyan]Epoch {epoch}", 
-                total=steps_per_epoch, 
-                metrics="Loss: ..."
-            )
-            progress.start()
+            if RICH_AVAILABLE:
+                progress = Progress(
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    TimeRemainingColumn(),
+                    TextColumn("[magenta]{task.fields[metrics]}")
+                )
+                task_id = progress.add_task(
+                    f"[cyan]Epoch {epoch}", 
+                    total=steps_per_epoch, 
+                    metrics="Loss: ..."
+                )
+                progress.start()
+            else:
+                print(f"Epoch {epoch} Started...")
         
         for i, batch in enumerate(dataloader):
             if i >= steps_per_epoch: break
@@ -152,12 +159,16 @@ def main():
                 total_metrics[k] += v
                 
             # Update Progress
-            if is_master and progress is not None:
+            if is_master:
                 avg_loss = total_loss / (i + 1)
                 avg_delta = total_metrics['delta'] / (i + 1)
                 avg_dag = total_metrics['dag'] / (i + 1)
                 metric_str = f"L: {avg_loss:.2f} | Δ: {avg_delta:.2f} | DAG: {avg_dag:.3f}"
-                progress.update(task_id, advance=1, metrics=metric_str)
+                
+                if RICH_AVAILABLE and progress is not None:
+                    progress.update(task_id, advance=1, metrics=metric_str)
+                elif i % 50 == 0:
+                    print(f"  Step {i}/{steps_per_epoch} | {metric_str}")
             
             if args.dry_run: break
             
