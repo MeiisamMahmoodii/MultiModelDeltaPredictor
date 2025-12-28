@@ -2,7 +2,10 @@ import torch
 import time
 import json
 import os
-from rich import print as rprint
+try:
+    from rich import print as rprint
+except ImportError:
+    rprint = print
 from torch.utils.data import DataLoader
 from src.data.SCMGenerator import SCMGenerator
 from src.data.CausalDataset import CausalDataset
