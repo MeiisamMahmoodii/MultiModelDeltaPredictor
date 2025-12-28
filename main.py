@@ -12,6 +12,7 @@ from src.data.collate import collate_fn_pad
 from src.training.trainer import train_model 
 from src.training.loss import causal_loss_fn
 from src.training.curriculum import CurriculumManager
+from src.training.metrics import compute_shd, compute_f1, compute_mae, compute_tpr_fdr
 try:
     from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
     RICH_AVAILABLE = True
@@ -106,7 +107,11 @@ def main():
         
         model.train()
         total_loss = 0
-        total_metrics = {"delta": 0.0, "dag": 0.0, "h": 0.0}
+        total_metrics = {
+            "delta": 0.0, "dag": 0.0, "h": 0.0,
+            "shd": 0.0, "f1": 0.0, "mae": 0.0,
+            "tpr": 0.0, "fdr": 0.0
+        }
         
         # Progress Bar (Only on Master)
         progress = None
@@ -141,6 +146,7 @@ def main():
             # Forward
             deltas, logits, adj = model(base, int_s, target, mask, idx)
             
+            
             # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
             loss, items = causal_loss_fn(
                 deltas, 
@@ -153,17 +159,31 @@ def main():
             loss.backward()
             optimizer.step()
             
+            # Additional Metrics
+            with torch.no_grad():
+                shd = compute_shd(logits, batch['adj'].to(device))
+                f1 = compute_f1(logits, batch['adj'].to(device))
+                mae = compute_mae(deltas, batch['delta'].to(device))
+                tpr, fdr = compute_tpr_fdr(logits, batch['adj'].to(device))
+            
             # Track Metrics
             total_loss += loss.item()
             for k, v in items.items():
                 total_metrics[k] += v
+            total_metrics['shd'] += shd
+            total_metrics['f1'] += f1
+            total_metrics['mae'] += mae
+            total_metrics['tpr'] += tpr
+            total_metrics['fdr'] += fdr
                 
             # Update Progress
             if is_master:
                 avg_loss = total_loss / (i + 1)
-                avg_delta = total_metrics['delta'] / (i + 1)
-                avg_dag = total_metrics['dag'] / (i + 1)
-                metric_str = f"L: {avg_loss:.2f} | Δ: {avg_delta:.2f} | DAG: {avg_dag:.3f}"
+                avg_shd = total_metrics['shd'] / (i + 1)
+                avg_f1 = total_metrics['f1'] / (i + 1)
+                avg_mae = total_metrics['mae'] / (i + 1)
+                
+                metric_str = f"L:{avg_loss:.1f}|MAE:{avg_mae:.2f}|SHD:{avg_shd:.1f}|F1:{avg_f1:.2f}|TPR:{tpr:.2f}|FDR:{fdr:.2f}"
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)
