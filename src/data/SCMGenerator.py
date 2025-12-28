@@ -63,10 +63,16 @@ class SCMGenerator:
             elif eq == 10: dag[u][v]['type'] = "cubic"
         return dag
 
-    def generate_data(self, dag, num_samples, noise_scale=None, intervention=None):
+    def generate_data(self, dag, num_samples, noise_scale=None, intervention=None, noise=None):
         if noise_scale is None: noise_scale = self.noise_scale
         nodes = list(dag.nodes())
-        data = pd.DataFrame(np.random.normal(scale=noise_scale, size=(num_samples, len(nodes))), columns=nodes)
+        
+        # Twin World Logic: Use provided noise if available
+        if noise is None:
+            noise = np.random.normal(scale=noise_scale, size=(num_samples, len(nodes)))
+        
+        data = pd.DataFrame(noise, columns=nodes)
+        
         try:
             sorted_nodes = list(nx.topological_sort(dag))
         except:
@@ -80,7 +86,7 @@ class SCMGenerator:
             parents = list(dag.predecessors(node))
             if not parents: continue
             
-            total = data[node].values.copy()
+            total = data[node].values.copy() # Start with noise
             for p in parents:
                 func = dag[p][node].get('type', 'linear')
                 pval = data[p].values
@@ -95,27 +101,49 @@ class SCMGenerator:
                 else: term = pval # Fallback
                 total += term
             data[node] = np.clip(total, -20, 20)
-        return data
+        return data, noise
 
     def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True):
         if num_nodes is None: num_nodes = self.num_nodes
         dag = self.generate_dag(num_nodes, edge_prob)
         dag = self.edge_parameters(dag)
         
-        df_base = self.generate_data(dag, num_samples_base)
+        # 1. Generate Global Noise (The "World State")
+        # We generate enough noise for the interventions. 
+        # Note: Ideally baseline and interventions share the SAME noise rows.
+        # Let's assume we want N samples where row i is "Person i".
+        # We observe Person i normally, AND we observe Person i under intervention.
+        nodes = list(dag.nodes())
+        noise_dim = len(nodes)
+        
+        # Generate noise for the largest batch we might need
+        # Actually, let's just generate distinct noise for base? 
+        # NO! The whole point of Twin World is variance reduction.
+        # We want: Delta = (Mechanisms(Noise) + Noise) - (Mechanisms_Int(Noise) + Noise)
+        # So we MUST reuse the noise.
+        
+        # Let's generate a fixed set of noise vectors to be used across all scenarios
+        # shape: (num_samples, num_vars)
+        global_noise = np.random.normal(scale=self.noise_scale, size=(num_samples_per_intervention, noise_dim))
+        
+        # Base Data (Observational) using Global Noise
+        # Note: If num_samples_base != num_samples_per_int, we have a mismatch.
+        # For simplicity in this unified version, we force them to match or slice.
+        df_base, _ = self.generate_data(dag, num_samples_per_intervention, noise=global_noise)
         
         # Interventions
-        nodes = list(dag.nodes())
         prob = intervention_prob if intervention_prob else self.intervention_prob
         num_targets = max(1, int(len(nodes) * prob))
         targets = np.random.choice(nodes, size=num_targets, replace=False)
         
         all_dfs = [df_base]
-        all_masks = [np.zeros((1, len(nodes)))] # Base mask
+        all_masks = [np.zeros((num_samples_per_intervention, len(nodes)))]
         
         for t in targets:
             for val in self.intervention_values:
-                df_int = self.generate_data(dag, num_samples_per_intervention, intervention={t: val})
+                # Intervened Data using SAME Global Noise
+                df_int, _ = self.generate_data(dag, num_samples_per_intervention, intervention={t: val}, noise=global_noise)
+                
                 mask = np.zeros((num_samples_per_intervention, len(nodes)))
                 mask[:, t] = 1.0
                 all_dfs.append(df_int)
@@ -124,7 +152,8 @@ class SCMGenerator:
         result = {
             "dag": dag,
             "base_tensor": torch.tensor(df_base.values, dtype=torch.float32) if as_torch else df_base,
-            "all_dfs": all_dfs, # Keep as DF for easier processing in dataset
+            # We return lists of DFs. Dataset will collate them.
+            "all_dfs": all_dfs, 
             "all_masks": all_masks
         }
         return result

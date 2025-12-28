@@ -28,21 +28,30 @@ class CausalDataset(IterableDataset):
             
             # Loop through interventional batches
             # res['all_dfs'] is list of DFs, index 0 is base
+            # Loop through interventional batches
+            # res['all_dfs'] is list of DFs, index 0 is base
             for i in range(1, len(res['all_dfs'])):
                 int_tensor = torch.tensor(res['all_dfs'][i].values, dtype=torch.float32)
                 int_mask = torch.tensor(res['all_masks'][i][0], dtype=torch.float32)
                 int_node_idx = torch.argmax(int_mask)
                 
+                # Twin World Matching:
+                # We assume SCMGenerator used the SAME noise rows for base and int.
+                # So row j in base corresponds to row j in int.
+                # SCMGenerator.generate_pipeline should guarantee this by using Global Noise.
+                
                 for j in range(int_tensor.shape[0]):
-                    b_idx = np.random.randint(0, base_tensor.shape[0])
-                    target_row = base_tensor[b_idx]
+                    # Match row j with row j
+                    target_row = base_tensor[j]
                     intervened_row = int_tensor[j]
+                    
+                    # Delta calculation: (Mechanisms_Int + Noise) - (Mechanisms_Base + Noise)
                     delta = intervened_row - target_row
                     
                     yield {
-                        "base_samples": base_tensor,
-                        "int_samples": int_tensor,
-                        "target_row": target_row,
+                        "base_samples": base_tensor, # Context batch (can refer to whole population)
+                        "int_samples": int_tensor,   # (Optional) context
+                        "target_row": target_row,    # The specific sample we are predicting for
                         "int_mask": int_mask,
                         "int_node_idx": int_node_idx,
                         "delta": delta,
