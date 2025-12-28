@@ -16,6 +16,8 @@ def setup_ddp():
     if "LOCAL_RANK" in os.environ:
         dist.init_process_group("nccl")
         local_rank = int(os.environ["LOCAL_RANK"])
+        import numpy as np
+        np.random.seed(local_rank) # Ensure different data per rank
         torch.cuda.set_device(local_rank)
         return local_rank
     return 0
@@ -86,9 +88,9 @@ def main():
             samples_per_graph=64
         )
         
-        # Sampler for DDP
-        sampler = DistributedSampler(dataset) if dist.is_initialized() else None
-        dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn_pad, sampler=sampler)
+        # No DistributedSampler for IterableDataset
+        # Each rank has its own process and generator state.
+        dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn_pad, sampler=None)
         
         # Train 1 Epoch (which is infinite stream, so we define steps)
         steps_per_epoch = 50 if args.dry_run else 100
