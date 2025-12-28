@@ -183,7 +183,8 @@ def main():
                 avg_f1 = total_metrics['f1'] / (i + 1)
                 avg_mae = total_metrics['mae'] / (i + 1)
                 
-                metric_str = f"L:{avg_loss:.1f}|MAE:{avg_mae:.2f}|SHD:{avg_shd:.1f}|F1:{avg_f1:.2f}|TPR:{tpr:.2f}|FDR:{fdr:.2f}"
+                avg_delta = total_metrics['delta'] / (i + 1)
+                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f} | F1: {avg_f1:.2f} | TPR: {tpr:.2f} | FDR: {fdr:.2f}"
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)
