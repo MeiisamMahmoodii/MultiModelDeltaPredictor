@@ -1,0 +1,23 @@
+# System files
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.venv/
+env/
+venv/
+*.egg-info/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Project Specific
+checkpoints/
+logs/
