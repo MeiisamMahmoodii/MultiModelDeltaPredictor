@@ -10,6 +10,7 @@ from src.data.SCMGenerator import SCMGenerator
 from src.data.CausalDataset import CausalDataset
 from src.data.collate import collate_fn_pad
 from src.training.trainer import train_model 
+from src.training.loss import causal_loss_fn
 from src.training.curriculum import CurriculumManager
 
 def setup_ddp():
@@ -56,7 +57,10 @@ def main():
     
     if dist.is_initialized():
         print("Moving to DDP...")
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+        # find_unused_parameters=True is required because:
+        # 1. Curriculum means we don't use all experts in early stages.
+        # 2. Some heads might be skipped conditionally.
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     # 2. Data & Curriculum
     curriculum = CurriculumManager(min_vars=args.min_vars, max_vars=args.max_vars)
@@ -111,10 +115,13 @@ def main():
             # Forward
             deltas, logits, adj = model(base, int_s, target, mask, idx)
             
-            # Loss (Simple MSE for Delta, BCE for DAG)
-            delta_loss = torch.nn.functional.mse_loss(deltas, batch['delta'].to(device))
-            
-            loss = delta_loss 
+            # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
+            loss, items = causal_loss_fn(
+                deltas, 
+                batch['delta'].to(device), 
+                logits, 
+                batch['adj'].to(device)
+            ) 
             
             optimizer.zero_grad()
             loss.backward()
