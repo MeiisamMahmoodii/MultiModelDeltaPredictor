@@ -12,6 +12,7 @@ from src.data.collate import collate_fn_pad
 from src.training.trainer import train_model 
 from src.training.loss import causal_loss_fn
 from src.training.curriculum import CurriculumManager
+from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
 def setup_ddp():
     if "LOCAL_RANK" in os.environ:
@@ -101,6 +102,24 @@ def main():
         
         model.train()
         total_loss = 0
+        total_metrics = {"delta": 0.0, "dag": 0.0, "h": 0.0}
+        
+        # Progress Bar (Only on Master)
+        progress = None
+        if is_master:
+            progress = Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
+                TextColumn("[magenta]{task.fields[metrics]}")
+            )
+            task_id = progress.add_task(
+                f"[cyan]Epoch {epoch}", 
+                total=steps_per_epoch, 
+                metrics="Loss: ..."
+            )
+            progress.start()
         
         for i, batch in enumerate(dataloader):
             if i >= steps_per_epoch: break
@@ -126,13 +145,26 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
+            # Track Metrics
             total_loss += loss.item()
+            for k, v in items.items():
+                total_metrics[k] += v
+                
+            # Update Progress
+            if is_master and progress is not None:
+                avg_loss = total_loss / (i + 1)
+                avg_delta = total_metrics['delta'] / (i + 1)
+                avg_dag = total_metrics['dag'] / (i + 1)
+                metric_str = f"L: {avg_loss:.2f} | Δ: {avg_delta:.2f} | DAG: {avg_dag:.3f}"
+                progress.update(task_id, advance=1, metrics=metric_str)
             
             if args.dry_run: break
             
         if is_master:
+            if progress: progress.stop()
             avg_loss = total_loss / (i+1)
-            print(f"Epoch {epoch} Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch} Final: {avg_loss:.4f}")
             
         if args.dry_run:
             print("Dry Run Successful.")
