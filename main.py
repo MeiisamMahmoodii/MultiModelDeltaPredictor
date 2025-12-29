@@ -59,6 +59,9 @@ def main():
         print(f"Structure: Interleaved Tokens | Architecture: Hyper-Experts")
         print(f"Data: Twin World Variance Reduction")
         print(f"Device: {device}")
+        
+        # Create checkpoints directory
+        os.makedirs("checkpoints", exist_ok=True)
 
     # 1. Model
     # Max vars + buffer for embeddings
@@ -270,13 +273,19 @@ def main():
         
         # 3. Save Checkpoint (Master Only)
         if is_master:
-            torch.save({
+            # 1. Save Resume Checkpoint
+            checkpoint_data = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'curriculum_state_dict': curriculum.state_dict(),
                 'args': args
-            }, args.checkpoint_path)
+            }
+            torch.save(checkpoint_data, args.checkpoint_path)
+            
+            # 2. Save Historical Snapshot
+            snapshot_path = f"checkpoints/checkpoint_epoch_{epoch}.pt"
+            torch.save(checkpoint_data, snapshot_path)
             
         if args.dry_run:
             print("Dry Run Successful.")
