@@ -63,3 +63,15 @@ class CurriculumManager:
             return True, True # Level Up, Reset LR
             
         return False, False
+
+    def state_dict(self):
+        return {
+            "current_level": self.current_level,
+            "stability_counter": self.stability_counter,
+            "best_metric": self.best_metric
+        }
+
+    def load_state_dict(self, state_dict):
+        self.current_level = state_dict.get("current_level", 0)
+        self.stability_counter = state_dict.get("stability_counter", 0)
+        self.best_metric = state_dict.get("best_metric", float('inf'))

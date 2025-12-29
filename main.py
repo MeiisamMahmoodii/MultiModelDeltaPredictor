@@ -43,6 +43,8 @@ def main():
     parser.add_argument("--edge_prob", type=float, default=None, help="Fixed edge probability (overrides curriculum)")
     parser.add_argument("--intervention_prob", type=float, default=0.5, help="Probability of intervening on a node")
     parser.add_argument("--dry_run", action="store_true", help="Run 1 step to verify pipeline")
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument("--checkpoint_path", type=str, default="last_checkpoint.pt", help="Path to checkpoint")
     
     args = parser.parse_args()
     
@@ -78,7 +80,26 @@ def main():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     
-    for epoch in range(args.epochs):
+    start_epoch = 0
+    
+    # Resume Logic
+    if args.resume and os.path.exists(args.checkpoint_path):
+        if is_master:
+            print(f"Resuming from {args.checkpoint_path}...")
+        # Map location is important for DDP
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
+        checkpoint = torch.load(args.checkpoint_path, map_location=map_location)
+        
+        # Handle state dict for DDP (remove 'module.' prefix if needed or add it)
+        # However, DDP wraps model in 'module.', so direct load normally works if saved from DDP.
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        if is_master:
+            print(f"Resumed at Epoch {start_epoch} | Level {curriculum.current_level}")
+    
+    for epoch in range(start_epoch, args.epochs):
         # Update Curriculum Stats
         params = curriculum.get_current_params()
         if is_master:
@@ -157,6 +178,7 @@ def main():
             
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Logic fix for instability
             optimizer.step()
             
             # Additional Metrics
@@ -193,10 +215,27 @@ def main():
             
             if args.dry_run: break
             
-        if is_master:
             if progress: progress.stop()
             avg_loss = total_loss / (i+1)
-            print(f"Epoch {epoch} Final: {avg_loss:.4f}")
+            avg_mae = total_metrics['mae'] / (i + 1)
+            avg_f1 = total_metrics['f1'] / (i + 1)
+            
+            print(f"Epoch {epoch} Final: {avg_loss:.4f} | Level {curriculum.current_level}")
+            
+            # Curriculum Update
+            leveled_up, reset_lr = curriculum.update(avg_mae, avg_f1)
+            if leveled_up:
+                print(f"*** LEVEL UP! Model advanced to Level {curriculum.current_level} ***")
+                # Optional: Reset optimizer learning rate if handled by curriculum
+            
+            # Save Checkpoint
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'curriculum_state_dict': curriculum.state_dict(),
+                'args': args
+            }, args.checkpoint_path)
             
         if args.dry_run:
             print("Dry Run Successful.")
