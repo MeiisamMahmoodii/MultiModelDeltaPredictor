@@ -213,9 +213,6 @@ def main():
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)
-                
-                if RICH_AVAILABLE and progress is not None:
-                    progress.update(task_id, advance=1, metrics=metric_str)
                 else:
                     # ASCII Bar Logic
                     percent = (i+1) / steps_per_epoch
@@ -232,7 +229,7 @@ def main():
         # --- END OF EPOCH BLOCK (Outside Loop) ---
         if is_master:
             if progress: progress.stop()
-            if not RICH_AVAILABLE: print() # Newline after ASCII bar
+            if not RICH_AVAILABLE: print(flush=True) # Newline after ASCII bar
             
         # Calculate Epoch Metrics (Local Average)
         # Note: In strict DDP, we should all_reduce these. For now, local approx is fine for curriculum.
