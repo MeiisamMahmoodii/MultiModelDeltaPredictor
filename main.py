@@ -39,7 +39,7 @@ def main():
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--min_vars", type=int, default=20)
     parser.add_argument("--max_vars", type=int, default=50)
     parser.add_argument("--edge_prob", type=float, default=None, help="Fixed edge probability (overrides curriculum)")
@@ -129,7 +129,7 @@ def main():
         dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn_pad, sampler=None)
         
         # Train 1 Epoch (which is infinite stream, so we define steps)
-        steps_per_epoch = 50 if args.dry_run else 100
+        steps_per_epoch = 50 if args.dry_run else 1000
         
         model.train()
         total_loss = 0
