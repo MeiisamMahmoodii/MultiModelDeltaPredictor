@@ -65,7 +65,7 @@ def main():
 
     # 1. Model
     # Max vars + buffer for embeddings
-    model = CausalTransformer(num_nodes=args.max_vars + 5, d_model=128,num_layers=12)
+    model = CausalTransformer(num_nodes=args.max_vars + 5)
     model.to(device)
     
     if dist.is_initialized():

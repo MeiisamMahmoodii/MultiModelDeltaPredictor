@@ -22,7 +22,7 @@ class CausalTransformer(nn.Module):
     - Hyper-Interventional Experts
     - Sparse Structure Learning (Gumbel)
     """
-    def __init__(self, num_nodes, d_model=128, nhead=4, num_layers=4):
+    def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12):
         super().__init__()
         self.num_nodes = num_nodes
         
