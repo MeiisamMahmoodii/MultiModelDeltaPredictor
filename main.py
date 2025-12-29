@@ -154,7 +154,8 @@ def main():
                 )
                 progress.start()
             else:
-                print(f"Epoch {epoch} Started...")
+                # ASCII Header
+                print(f"Epoch {epoch} Started (ASCII Progress Mode)", flush=True)
         
         for i, batch in enumerate(dataloader):
             if i >= steps_per_epoch: break
@@ -212,14 +213,26 @@ def main():
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)
-                elif i % 50 == 0:
-                    print(f"  Step {i}/{steps_per_epoch} | {metric_str}")
+                
+                if RICH_AVAILABLE and progress is not None:
+                    progress.update(task_id, advance=1, metrics=metric_str)
+                else:
+                    # ASCII Bar Logic
+                    percent = (i+1) / steps_per_epoch
+                    bar_len = 30
+                    filled_len = int(bar_len * percent)
+                    bar = '=' * filled_len + '>' + '-' * (bar_len - filled_len - 1)
+                    if percent == 1.0: bar = '=' * bar_len
+                    
+                    # \r overwrites the line
+                    print(f"\r[{bar}] {int(percent*100)}% | {metric_str}", end='', flush=True)
             
             if args.dry_run: break
             
         # --- END OF EPOCH BLOCK (Outside Loop) ---
-        if is_master and progress: 
-            progress.stop()
+        if is_master:
+            if progress: progress.stop()
+            if not RICH_AVAILABLE: print() # Newline after ASCII bar
             
         # Calculate Epoch Metrics (Local Average)
         # Note: In strict DDP, we should all_reduce these. For now, local approx is fine for curriculum.
