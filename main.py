@@ -39,7 +39,7 @@ def main():
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--min_vars", type=int, default=20)
     parser.add_argument("--max_vars", type=int, default=50)
     parser.add_argument("--edge_prob", type=float, default=None, help="Fixed edge probability (overrides curriculum)")
