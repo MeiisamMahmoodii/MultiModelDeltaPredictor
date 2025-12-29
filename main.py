@@ -15,6 +15,8 @@ from src.training.curriculum import CurriculumManager
 from src.training.metrics import compute_shd, compute_f1, compute_mae, compute_tpr_fdr
 try:
     from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+    from rich.table import Table
+    from rich import print as rprint
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -215,20 +217,49 @@ def main():
             
             if args.dry_run: break
             
-            if progress: progress.stop()
-            avg_loss = total_loss / (i+1)
-            avg_mae = total_metrics['mae'] / (i + 1)
-            avg_f1 = total_metrics['f1'] / (i + 1)
+        # --- END OF EPOCH BLOCK (Outside Loop) ---
+        if is_master and progress: 
+            progress.stop()
             
-            print(f"Epoch {epoch} Final: {avg_loss:.4f} | Level {curriculum.current_level}")
-            
-            # Curriculum Update
-            leveled_up, reset_lr = curriculum.update(avg_mae, avg_f1)
-            if leveled_up:
-                print(f"*** LEVEL UP! Model advanced to Level {curriculum.current_level} ***")
-                # Optional: Reset optimizer learning rate if handled by curriculum
-            
-            # Save Checkpoint
+        # Calculate Epoch Metrics (Local Average)
+        # Note: In strict DDP, we should all_reduce these. For now, local approx is fine for curriculum.
+        avg_loss = total_loss / (max(1, i+1))
+        avg_mae = total_metrics['mae'] / (max(1, i+1))
+        avg_f1 = total_metrics['f1'] / (max(1, i+1))
+        avg_shd = total_metrics['shd'] / (max(1, i+1))
+        avg_tpr = total_metrics['tpr'] / (max(1, i+1))
+        avg_fdr = total_metrics['fdr'] / (max(1, i+1))
+        avg_delta = total_metrics['delta'] / (max(1, i+1))
+        
+        # 1. Update Curriculum (All Ranks must do this to stay in sync)
+        leveled_up, reset_lr = curriculum.update(avg_mae, avg_f1)
+        
+        # 2. Print Summary (Master Only)
+        if is_master:
+            if RICH_AVAILABLE:
+                table = Table(title=f"Epoch {epoch} Summary | Level {curriculum.current_level}")
+                table.add_column("Metric", style="cyan", no_wrap=True)
+                table.add_column("Value", style="magenta")
+                table.add_column("Verdict", style="green")
+                
+                table.add_row("Total Loss", f"{avg_loss:.4f}", "")
+                table.add_row("Delta Loss (Huber)", f"{avg_delta:.4f}", "")
+                table.add_row("MAE (L1)", f"{avg_mae:.4f}", "Excellent" if avg_mae < 1.0 else "Good")
+                table.add_row("SHD", f"{avg_shd:.2f}", "Lower is better")
+                table.add_row("F1 Score", f"{avg_f1:.4f}", "Higher is better")
+                table.add_row("TPR (Recall)", f"{avg_tpr:.4f}", "")
+                table.add_row("FDR (False Disc)", f"{avg_fdr:.4f}", "")
+                
+                rprint(table)
+                if leveled_up:
+                    rprint(f"[bold yellow]*** LEVEL UP! Advanced to Level {curriculum.current_level} ***[/bold yellow]")
+            else:
+                print(f"Epoch {epoch} Final: L={avg_loss:.4f} | MAE={avg_mae:.4f} | SHD={avg_shd:.2f} | Lvl={curriculum.current_level}")
+                if leveled_up:
+                    print(f"*** LEVEL UP! Advanced to Level {curriculum.current_level} ***")
+        
+        # 3. Save Checkpoint (Master Only)
+        if is_master:
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
