@@ -68,6 +68,10 @@ def main():
     model = CausalTransformer(num_nodes=args.max_vars + 5)
     model.to(device)
     
+    if is_master:
+        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model Parameters: {total_params:,}")
+    
     if dist.is_initialized():
         print("Moving to DDP...")
         # find_unused_parameters=True is required because:
