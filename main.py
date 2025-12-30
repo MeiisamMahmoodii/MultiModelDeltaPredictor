@@ -295,8 +295,23 @@ def main():
         val_f1_sum = 0.0
         val_batches = 0
         
+        # Validation Progress Bar
+        val_progress = None
+        if is_master:
+            print(f"Validating on Fixed Set...", flush=True)
+            if RICH_AVAILABLE:
+                val_progress = Progress(
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    TimeRemainingColumn(),
+                    TextColumn("[magenta]{task.fields[metrics]}")
+                )
+                val_task = val_progress.add_task("[green]Validating", total=len(val_loader), metrics="MAE: ...")
+                val_progress.start()
+
         with torch.no_grad():
-            for val_batch in val_loader:
+            for i, val_batch in enumerate(val_loader):
                 base = val_batch['base_samples'].to(device)
                 int_s = val_batch['int_samples'].to(device)
                 target = val_batch['target_row'].to(device)
@@ -305,9 +320,19 @@ def main():
                 
                 deltas, logits, adj = model(base, int_s, target, mask, idx)
                 
-                val_mae_sum += compute_mae(deltas, val_batch['delta'].to(device))
-                val_f1_sum += compute_f1(logits, val_batch['adj'].to(device))
+                # Metrics
+                batch_mae = compute_mae(deltas, val_batch['delta'].to(device))
+                batch_f1 = compute_f1(logits, val_batch['adj'].to(device))
+                
+                val_mae_sum += batch_mae
+                val_f1_sum += batch_f1
                 val_batches += 1
+                
+                if is_master and val_progress:
+                     val_progress.update(val_task, advance=1, metrics=f"MAE: {val_mae_sum/val_batches:.3f}")
+
+        if is_master and val_progress:
+            val_progress.stop()
                 
         val_mae = val_mae_sum / max(1, val_batches)
         val_f1 = val_f1_sum / max(1, val_batches)
