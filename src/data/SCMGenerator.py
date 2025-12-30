@@ -89,6 +89,8 @@ class SCMGenerator:
             parents = list(dag.predecessors(node))
             if not parents: continue
             
+            total = data[node].values.copy() # Start with noise
+            
             # Physics Engine 2.0: Interactions & Non-Linearities
             terms = []
             for p in parents:
