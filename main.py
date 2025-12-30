@@ -114,7 +114,7 @@ def main():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        optimizer, mode='min', factor=0.5, patience=5
     )
     
     start_epoch = 0
@@ -131,15 +131,16 @@ def main():
             print(f"Resuming from {args.checkpoint_path}...")
         # Map location is important for DDP
         map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
-        checkpoint = torch.load(args.checkpoint_path, map_location=map_location)
+        checkpoint = torch.load(args.checkpoint_path, map_location=map_location, weights_only=False)
         
         # Handle state dict for DDP (remove 'module.' prefix if needed or add it)
         # However, DDP wraps model in 'module.', so direct load normally works if saved from DDP.
         model.load_state_dict(checkpoint['model_state_dict'])
-        model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            # Force verbose off to avoid warnings from resumed state
+            if hasattr(scheduler, 'verbose'): scheduler.verbose = False
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
