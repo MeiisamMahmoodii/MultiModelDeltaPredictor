@@ -278,7 +278,7 @@ def main():
                     if percent == 1.0: bar = '=' * bar_len
                     
                     # \r overwrites the line
-                    print(f"\r[{bar}] {int(percent*100)}% |step {i+1} | {metric_str}", end='', flush=True)
+                    print(f"\r[{bar}] {int(percent*100)}% | step: {i+1} | {metric_str}", end='', flush=True)
             
             if args.dry_run: break
             
