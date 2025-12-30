@@ -9,7 +9,6 @@ from src.models.CausalTransformer import CausalTransformer
 from src.data.SCMGenerator import SCMGenerator
 from src.data.CausalDataset import CausalDataset
 from src.data.collate import collate_fn_pad
-from src.training.trainer import train_model 
 from src.training.loss import causal_loss_fn
 from src.training.curriculum import CurriculumManager
 from src.training.metrics import compute_shd, compute_f1, compute_mae, compute_tpr_fdr
@@ -114,7 +113,7 @@ def main():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
+        optimizer, mode='min', factor=0.9, patience=5
     )
     
     start_epoch = 0
