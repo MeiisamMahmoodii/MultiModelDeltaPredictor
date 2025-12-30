@@ -35,9 +35,6 @@ def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-def cleanup_ddp():
-    if dist.is_initialized():
-        dist.destroy_process_group()
 
 def get_validation_set(num_vars, device):
     """
@@ -61,6 +58,9 @@ def get_validation_set(num_vars, device):
     )
     return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
 
+    return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
+
+def main():
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
