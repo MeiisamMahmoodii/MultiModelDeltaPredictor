@@ -14,7 +14,7 @@ def compute_h_loss(adj_matrix):
         return h
 
 def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj, 
-                   lambda_delta=10.0, lambda_dag=1.0, lambda_h=0.1, lambda_l1=0.01):
+                   lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0):
     loss_delta = nn.functional.huber_loss(pred_delta, true_delta)
     loss_dag = nn.functional.binary_cross_entropy_with_logits(pred_adj, true_adj)
     
