@@ -182,7 +182,7 @@ def main():
         dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn_pad, sampler=None)
         
         # Train 1 Epoch (which is infinite stream, so we define steps)
-        steps_per_epoch = 50 if args.dry_run else 1000
+        steps_per_epoch = 50 if args.dry_run else 500
         
         model.train()
         total_loss = 0
