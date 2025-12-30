@@ -35,7 +35,32 @@ def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-def main():
+def cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+def get_validation_set(num_vars, device):
+    """
+    Generates a fixed validation set for a specific number of variables.
+    Returns a DataLoader.
+    """
+    # Fixed parameters for validation to be a fair benchmark
+    gen = SCMGenerator(
+        num_nodes=num_vars, 
+        edge_prob=0.2, # Average density
+        noise_scale=1.0,
+        intervention_prob=0.5
+    )
+    # Generate 32 fixed graphs for validation
+    dataset = CausalDataset(
+        gen, 
+        num_nodes_range=(num_vars, num_vars),
+        samples_per_graph=64,
+        infinite=False, # Important: Fixed size
+        validation_graphs=32
+    )
+    return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
+
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -88,6 +113,15 @@ def main():
     # For V1 Unification, let's run a simple loop here.
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
+    
+    start_epoch = 0
+    
+    # Validation Loader (Dynamic)
+    val_loader = None
+    current_val_vars = -1
     
     start_epoch = 0
     
@@ -102,7 +136,11 @@ def main():
         # Handle state dict for DDP (remove 'module.' prefix if needed or add it)
         # However, DDP wraps model in 'module.', so direct load normally works if saved from DDP.
         model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         if is_master:
@@ -111,6 +149,16 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         # Update Curriculum Stats
         params = curriculum.get_current_params()
+        
+        # Check if we need to regenerate validation set (Level Changed or First Run)
+        if params['max_vars'] != current_val_vars:
+            if is_master: 
+                print(f"Generating new Validation Set for {params['max_vars']} vars...")
+            # We generate Val Set on all ranks to avoid broadcasting complexity for now 
+            # (RNG seeded by local_rank, so each rank validates on its own slice)
+            val_loader = get_validation_set(params['max_vars'], device)
+            current_val_vars = params['max_vars']
+            
         if is_master:
             print(f"Epoch {epoch} | Level {curriculum.current_level} | Vars {params['max_vars']}")
         
@@ -233,45 +281,66 @@ def main():
             
             if args.dry_run: break
             
+            if args.dry_run: break
+            
         # --- END OF EPOCH BLOCK (Outside Loop) ---
         if is_master:
             if progress: progress.stop()
             if not RICH_AVAILABLE: print(flush=True) # Newline after ASCII bar
             
-        # Calculate Epoch Metrics (Local Average)
-        # Note: In strict DDP, we should all_reduce these. For now, local approx is fine for curriculum.
-        avg_loss = total_loss / (max(1, i+1))
-        avg_mae = total_metrics['mae'] / (max(1, i+1))
-        avg_f1 = total_metrics['f1'] / (max(1, i+1))
-        avg_shd = total_metrics['shd'] / (max(1, i+1))
-        avg_tpr = total_metrics['tpr'] / (max(1, i+1))
-        avg_fdr = total_metrics['fdr'] / (max(1, i+1))
-        avg_delta = total_metrics['delta'] / (max(1, i+1))
+        # --- Validation Loop (Fixed Set) ---
+        model.eval()
+        val_mae_sum = 0.0
+        val_f1_sum = 0.0
+        val_batches = 0
         
-        # 1. Update Curriculum (All Ranks must do this to stay in sync)
-        leveled_up, reset_lr = curriculum.update(avg_mae, avg_f1)
+        with torch.no_grad():
+            for val_batch in val_loader:
+                base = val_batch['base_samples'].to(device)
+                int_s = val_batch['int_samples'].to(device)
+                target = val_batch['target_row'].to(device)
+                mask = val_batch['int_mask'].to(device)
+                idx = val_batch['int_node_idx'].to(device)
+                
+                deltas, logits, adj = model(base, int_s, target, mask, idx)
+                
+                val_mae_sum += compute_mae(deltas, val_batch['delta'].to(device))
+                val_f1_sum += compute_f1(logits, val_batch['adj'].to(device))
+                val_batches += 1
+                
+        val_mae = val_mae_sum / max(1, val_batches)
+        val_f1 = val_f1_sum / max(1, val_batches)
+        
+        # Step Scheduler
+        scheduler.step(val_mae)
+        
+        # Calculate Epoch Metrics (Training Avg)
+        avg_loss = total_loss / (max(1, i+1))
+        # avg_mae = total_metrics['mae'] / (max(1, i+1)) # Using Validation MAE for curriculum now
+        avg_shd = total_metrics['shd'] / (max(1, i+1)) 
+        
+        # 1. Update Curriculum (using VALIDATION Scores)
+        leveled_up, reset_lr = curriculum.update(val_mae, val_f1)
         
         # 2. Print Summary (Master Only)
         if is_master:
             if RICH_AVAILABLE:
                 table = Table(title=f"Epoch {epoch} Summary | Level {curriculum.current_level}")
                 table.add_column("Metric", style="cyan", no_wrap=True)
-                table.add_column("Value", style="magenta")
-                table.add_column("Verdict", style="green")
+                table.add_column("Train", style="magenta")
+                table.add_column("Val (Fixed)", style="green")
                 
-                table.add_row("Total Loss", f"{avg_loss:.4f}", "")
-                table.add_row("Delta Loss (Huber)", f"{avg_delta:.4f}", "")
-                table.add_row("MAE (L1)", f"{avg_mae:.4f}", "Excellent" if avg_mae < 1.0 else "Good")
-                table.add_row("SHD", f"{avg_shd:.2f}", "Lower is better")
-                table.add_row("F1 Score", f"{avg_f1:.4f}", "Higher is better")
-                table.add_row("TPR (Recall)", f"{avg_tpr:.4f}", "")
-                table.add_row("FDR (False Disc)", f"{avg_fdr:.4f}", "")
+                table.add_row("Total Loss", f"{avg_loss:.4f}", "-")
+                table.add_row("MAE (L1)", f"{total_metrics['mae']/(i+1):.4f}", f"{val_mae:.4f}")
+                table.add_row("SHD", f"{avg_shd:.2f}", "-")
+                table.add_row("F1 Score", f"{total_metrics['f1']/(i+1):.4f}", f"{val_f1:.4f}")
+                table.add_row("LR", f"{optimizer.param_groups[0]['lr']:.2e}", "")
                 
                 rprint(table)
                 if leveled_up:
                     rprint(f"[bold yellow]*** LEVEL UP! Advanced to Level {curriculum.current_level} ***[/bold yellow]")
             else:
-                print(f"Epoch {epoch} Final: L={avg_loss:.4f} | MAE={avg_mae:.4f} | SHD={avg_shd:.2f} | Lvl={curriculum.current_level}")
+                print(f"Ep {epoch}|L:{avg_loss:.2f}|TrMAE:{total_metrics['mae']/(i+1):.2f}|ValMAE:{val_mae:.2f}|LR:{optimizer.param_groups[0]['lr']:.2e}")
                 if leveled_up:
                     print(f"*** LEVEL UP! Advanced to Level {curriculum.current_level} ***")
         
@@ -282,6 +351,7 @@ def main():
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'curriculum_state_dict': curriculum.state_dict(),
                 'args': args
             }
