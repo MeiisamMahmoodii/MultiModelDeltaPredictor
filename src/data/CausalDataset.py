@@ -4,15 +4,21 @@ import networkx as nx
 from torch.utils.data import IterableDataset
 
 class CausalDataset(IterableDataset):
-    def __init__(self, generator, num_nodes_range=(5, 10), samples_per_graph=100, edge_prob=0.3, intervention_prob=0.5):
+    def __init__(self, generator, num_nodes_range=(5, 10), samples_per_graph=100, edge_prob=0.3, intervention_prob=0.5, infinite=True, validation_graphs=32):
         self.generator = generator
         self.num_nodes_range = num_nodes_range
         self.samples_per_graph = samples_per_graph
         self.edge_prob = edge_prob
         self.intervention_prob = intervention_prob
+        self.infinite = infinite
+        self.validation_graphs = validation_graphs
     
     def __iter__(self):
+        graphs_generated = 0
         while True:
+            if not self.infinite and graphs_generated >= self.validation_graphs:
+                break
+                
             n = np.random.randint(self.num_nodes_range[0], self.num_nodes_range[1] + 1)
             res = self.generator.generate_pipeline(
                 num_nodes=n,
@@ -23,11 +29,11 @@ class CausalDataset(IterableDataset):
                 as_torch=True
             )
             
+            graphs_generated += 1
+            
             adj = torch.tensor(nx.to_numpy_array(res['dag']), dtype=torch.float32)
             base_tensor = res['base_tensor']
             
-            # Loop through interventional batches
-            # res['all_dfs'] is list of DFs, index 0 is base
             # Loop through interventional batches
             # res['all_dfs'] is list of DFs, index 0 is base
             for i in range(1, len(res['all_dfs'])):
@@ -36,22 +42,17 @@ class CausalDataset(IterableDataset):
                 int_node_idx = torch.argmax(int_mask)
                 
                 # Twin World Matching:
-                # We assume SCMGenerator used the SAME noise rows for base and int.
-                # So row j in base corresponds to row j in int.
-                # SCMGenerator.generate_pipeline should guarantee this by using Global Noise.
-                
                 for j in range(int_tensor.shape[0]):
-                    # Match row j with row j
                     target_row = base_tensor[j]
                     intervened_row = int_tensor[j]
                     
-                    # Delta calculation: (Mechanisms_Int + Noise) - (Mechanisms_Base + Noise)
+                    # Delta calculation:
                     delta = intervened_row - target_row
                     
                     yield {
-                        "base_samples": base_tensor, # Context batch (can refer to whole population)
-                        "int_samples": int_tensor,   # (Optional) context
-                        "target_row": target_row,    # The specific sample we are predicting for
+                        "base_samples": base_tensor,
+                        "int_samples": int_tensor, 
+                        "target_row": target_row,
                         "int_mask": int_mask,
                         "int_node_idx": int_node_idx,
                         "delta": delta,
