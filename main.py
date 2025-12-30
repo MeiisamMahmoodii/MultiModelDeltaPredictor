@@ -211,7 +211,7 @@ def main():
                 progress.start()
             else:
                 # ASCII Header
-                print(f"Epoch {epoch} Started (ASCII Progress Mode)", flush=True)
+                print(f"Epoch {epoch} Started", flush=True)
         
         for i, batch in enumerate(dataloader):
             if i >= steps_per_epoch: break
@@ -278,9 +278,7 @@ def main():
                     if percent == 1.0: bar = '=' * bar_len
                     
                     # \r overwrites the line
-                    print(f"\r[{bar}] {int(percent*100)}% | {metric_str}", end='', flush=True)
-            
-            if args.dry_run: break
+                    print(f"\r[{bar}] {int(percent*100)}% |step {i+1} | {metric_str}", end='', flush=True)
             
             if args.dry_run: break
             
@@ -307,7 +305,9 @@ def main():
                     TimeRemainingColumn(),
                     TextColumn("[magenta]{task.fields[metrics]}")
                 )
-                val_task = val_progress.add_task("[green]Validating", total=len(val_loader), metrics="MAE: ...")
+                # Fixed val set: 32 graphs * 64 samples / 32 batch_size = 64 batches
+                val_steps = 64
+                val_task = val_progress.add_task("[green]Validating", total=val_steps, metrics="MAE: ...")
                 val_progress.start()
 
         with torch.no_grad():
