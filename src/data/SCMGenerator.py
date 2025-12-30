@@ -49,7 +49,7 @@ class SCMGenerator:
 
     def edge_parameters(self, dag):
         for u, v in dag.edges():
-            eq = np.random.randint(1, 11)
+            eq = np.random.randint(1, 14)
             # Assign type based on eq (Simplified logic for brevity, expands to full map if needed)
             if eq == 1: dag[u][v]['type'] = "linear"
             elif eq == 2: dag[u][v]['type'] = "negative linear"
@@ -61,6 +61,9 @@ class SCMGenerator:
             elif eq == 8: dag[u][v]['type'] = "sqrt"
             elif eq == 9: dag[u][v]['type'] = "quadratic"
             elif eq == 10: dag[u][v]['type'] = "cubic"
+            elif eq == 11: dag[u][v]['type'] = "sigmoid"
+            elif eq == 12: dag[u][v]['type'] = "step"
+            elif eq == 13: dag[u][v]['type'] = "abs"
         return dag
 
     def generate_data(self, dag, num_samples, noise_scale=None, intervention=None, noise=None):
@@ -86,7 +89,8 @@ class SCMGenerator:
             parents = list(dag.predecessors(node))
             if not parents: continue
             
-            total = data[node].values.copy() # Start with noise
+            # Physics Engine 2.0: Interactions & Non-Linearities
+            terms = []
             for p in parents:
                 func = dag[p][node].get('type', 'linear')
                 pval = data[p].values
@@ -98,8 +102,27 @@ class SCMGenerator:
                 elif func == 'tan': term = np.tanh(pval)
                 elif func == 'quadratic': term = np.clip(pval, -5, 5)**2
                 elif func == 'cubic': term = np.clip(pval, -3, 3)**3
+                elif func == 'sigmoid': term = 1 / (1 + np.exp(-pval))
+                elif func == 'step': term = (pval > 0).astype(float)
+                elif func == 'abs': term = np.abs(pval)
                 else: term = pval # Fallback
-                total += term
+                terms.append(term)
+            
+            # Combine Terms: Additive vs Multiplicative (Interaction)
+            # Randomly decide for this node if it's an "Interaction Node" 
+            # (In a real scenario, this would be fixed per DAG, but here we do it per generation for variety 
+            # OR we should store it in DAG. Let's do simple probabilistic mixing for now)
+            
+            if len(terms) > 1 and np.random.rand() < 0.3:
+                # Interaction: Product of first two terms + Sum of rest
+                # Represents "Modulation" (e.g. A * B + C)
+                interact = terms[0] * terms[1]
+                remaining = sum(terms[2:]) if len(terms) > 2 else 0
+                total += (interact + remaining)
+            else:
+                # Standard Additive Model
+                total += sum(terms)
+                
             data[node] = np.clip(total, -20, 20)
         return data, noise
 
