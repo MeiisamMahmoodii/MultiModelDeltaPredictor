@@ -70,6 +70,7 @@ def main():
     parser.add_argument("--intervention_prob", type=float, default=0.5, help="Probability of intervening on a node")
     parser.add_argument("--dry_run", action="store_true", help="Run 1 step to verify pipeline")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument("--reuse_factor", type=int, default=5, help="Reuse each generated graph N times")
     parser.add_argument("--checkpoint_path", type=str, default="last_checkpoint.pt", help="Path to checkpoint")
     
     args = parser.parse_args()
@@ -173,7 +174,8 @@ def main():
         dataset = CausalDataset(
             gen, 
             num_nodes_range=(params['max_vars']-1, params['max_vars']),
-            samples_per_graph=64
+            samples_per_graph=64,
+            reuse_factor=args.reuse_factor
         )
         
         # No DistributedSampler for IterableDataset
