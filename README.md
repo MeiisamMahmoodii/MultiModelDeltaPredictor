@@ -49,24 +49,25 @@ graph TD
 ```mermaid
 graph TD
     subgraph Data
-    TW[Twin World Generator] -->|Base + Int| Inputs
+    TW["Twin World Generator"] -->|Base + Int| Inputs
     end
     
     subgraph "Physics-Native Encoder"
-    Inputs -->|Scalars| Linear[Linear Emb (Magnitude)]
-    Inputs -->|Scalars| Fourier[Fourier Emb (Frequency/Waves)]
-    Inputs -->|Scalars| MLP[MLP Emb (Distortion)]
-    Linear & Fourier & MLP -->|Concat| Hybrid[Hybrid Token]
+    Inputs -->|Scalars| Linear["Linear Emb (Magnitude)"]
+    Inputs -->|Scalars| Fourier["Fourier Emb (Frequency/Waves)"]
+    Inputs -->|Scalars| MLP["MLP Emb (Distortion)"]
+    Linear & Fourier & MLP -->|Concat| Hybrid["Hybrid Token"]
     end
     
     subgraph "Universal Transformer"
-    Hybrid -->|Self-Attention| Backbone[Transformer Encoder]
-    Backbone -->|Vectorized| Speed[Vectorized SwiGLU Experts]
-    Speed -->|Expansion=8| Deep[Deep Physics Logic]
+    Hybrid -->|"Self-Attention"| Backbone["Transformer Encoder"]
+    Backbone -->|Vectorized| Speed["Vectorized SwiGLU Experts"]
+    Speed -->|"Expansion=8"| Deep["Deep Physics Logic"]
     end
     
-    Deep -->|Head 1| Delta[Delta Prediction (Physics)]
-    Deep -->|Head 2| Graph[Adjacency Matrix (Structure)]
+    Deep -->|"Head 1"| Delta["Delta Prediction (Physics)"]
+    Deep -->|"Head 2"| Graph["Adjacency Matrix (Structure)"]
+
 ```
 
 ---
