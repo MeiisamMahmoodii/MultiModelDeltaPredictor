@@ -129,8 +129,9 @@ class MoELayer(nn.Module):
         # 3. Weighted Sum
         output = (expert_outputs * weights).sum(dim=1) # (Total, )
         
-        # Reshape back to batch
-        return output.view(batch_size, num_active, 1)
+        # Reshape back to batch: (Batch, Num_Active)
+        # Was (Batch, Num_Active, 1) -> Caused broadcasting error with (Batch, Num_Active) target
+        return output.view(batch_size, num_active)
 
 class CausalTransformer(nn.Module):
     """
