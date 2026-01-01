@@ -63,7 +63,7 @@ def main():
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--lr", type=float, default=2e-6)
     parser.add_argument("--min_vars", type=int, default=20)
     parser.add_argument("--max_vars", type=int, default=50)
     parser.add_argument("--edge_prob", type=float, default=None, help="Fixed edge probability (overrides curriculum)")
@@ -239,7 +239,7 @@ def main():
             
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5) # Logic fix for instability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1) # Logic fix for instability
             optimizer.step()
             
             # Additional Metrics
