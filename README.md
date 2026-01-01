@@ -1,66 +1,130 @@
-# ISD-CP Unified: Hyper-Experimental Causal Discovery
+# Multi-Model Delta Predictor (ISD-CP Unified)
 
-**ISD-CP Unified** is a next-generation causal discovery framework designed to learn causal graphs and intervention effects from large-scale synthetic data.
+**ISD-CP (Interleaved Structural Discovery via Causal Prediction)** is a transformer-based framework for learning Causal Structural Causal Models (SCMs) by observing state transitions ("Deltas") under diverse interventions.
 
-Unlike traditional methods that treat interventions as passive data tokens, this project introduces **Hyper-Interventional Experts**, a novel architecture where the model's weights are dynamically re-programmed by a Hyper-Network based on the intervention target.
+This repository implements the **Phase 3 "Physics-Native" Architecture**.
 
-## 🌟 Key Research Novelty
+---
 
-### 1. Hyper-Interventional Experts (Model F)
-Standard Transformers treat "Intervention on Node X" as just another input feature. We argue an intervention is a **System Modification**.
-*   **Our Approach**: We use a **Hyper-Network** that takes the intervention target ID and generates modulation weights for the final prediction layer.
-*   **Result**: The model effectively "swaps out" its physical laws to match the intervened reality, providing a stronger inductive bias for perfect interventions.
+## 📅 Project Phases
 
-### 2. "Twin World" Variance Reduction
-Learning $\Delta = Y_{do} - Y_{obs}$ is noisy because standard generators use different $\epsilon$ for $Y_{do}$ and $Y_{obs}$.
-*   **Our Approach**: We generate the noise matrix $\epsilon$ *once*.
-*   **Result**: The noise term cancels out in the subtraction, leaving a pure causal signal. Variance drops to near zero, speeding up convergence by orders of magnitude.
+### Phase 1: Exploration & The "Model Zoo"
+*   **Goal**: Find the best architectural priors for causal discovery.
+*   **Method**: We implemented 5 competing architectures:
+    *   **Model A (Baseline)**: Simple Transformer.
+    *   **Model B (Experts)**: Mixture of Experts (MoE).
+    *   **Model C (Sparsity)**: L1 regularization emphasis.
+    *   **Model D (Masked)**: Masked language modeling approach.
+    *   **Model E (HyperNet)**: HyperNetwork generating weights from intervention IDs.
+*   **Result**: "Experts" (B) and "HyperNet" (E) showed the most promise.
+
+### Phase 2: Unification & "Twin World"
+*   **Goal**: Scale up and reduce variance.
+*   **Innovation 1 (Unification)**: Combined the best of A-E into a single `CausalTransformer`.
+*   **Innovation 2 (Data)**: Introduced **Twin World** generation.
+    *   *Concept*: Observe the *exact same* noise sample/person twice: once naturally, once intervened.
+    *   *Math*: $\Delta = \text{State}_{Int} - \text{State}_{Obs}$.
+*   **Innovation 3 (Tokenization)**: **Interleaved Tokens**. Sequence becomes `[Var1, Val1, Var2, Val2...]`.
+
+### Phase 3: Physics-Native Refinements (Current)
+*   **Goal**: Solve the "Skeptical Audit" by making the model grasp physics natively.
+*   **Feature 1**: **Hybrid Value Embeddings** (Linear + Fourier + MLP) to see waves (`sin/cos`) and distortions.
+*   **Feature 2**: **Vectorized MoE** for massive speedups (removed Python loops).
+*   **Feature 3**: **Universal Multi-Node Interventions** (removed hardcoded intervention IDs).
+
+---
+
+## 🧠 Model Architecture Evolution
+
+### Phase 1: The Zoo (Fragmented)
+```mermaid
+graph TD
+    Input --> A[Model A] & B[Model B] & C[Model C]
+    A --> OutA[Baseline Output]
+    B --> MoE[Experts] --> OutB
+    C --> Sparse[L1 Penalty] --> OutC
+```
+
+### Phase 3: The Physics-Native Engine (Unified)
+```mermaid
+graph TD
+    subgraph Data
+    TW[Twin World Generator] -->|Base + Int| Inputs
+    end
+    
+    subgraph "Physics-Native Encoder"
+    Inputs -->|Scalars| Linear[Linear Emb (Magnitude)]
+    Inputs -->|Scalars| Fourier[Fourier Emb (Frequency/Waves)]
+    Inputs -->|Scalars| MLP[MLP Emb (Distortion)]
+    Linear & Fourier & MLP -->|Concat| Hybrid[Hybrid Token]
+    end
+    
+    subgraph "Universal Transformer"
+    Hybrid -->|Self-Attention| Backbone[Transformer Encoder]
+    Backbone -->|Vectorized| Speed[Vectorized SwiGLU Experts]
+    Speed -->|Expansion=8| Deep[Deep Physics Logic]
+    end
+    
+    Deep -->|Head 1| Delta[Delta Prediction (Physics)]
+    Deep -->|Head 2| Graph[Adjacency Matrix (Structure)]
+```
+
+---
+
+## 🛠️ Data Pipeline
+
+### 1. SCM Generator ("Physics 2.0")
+We simulate complex physical systems, not just linear graphs.
+*   **Functions**: `Linear`, `Sin`, `Cos`, `Tanh`, `Sigmoid`, `Step`, `Quadratic`, `Cubic`.
+*   **Interactions**: 30% of nodes combine parents multiplicatively ($A \times B$) to effectively simulate "Modulation".
+
+### 2. Twin World Caching
+To stabilize training, we use a **Reuse Factor**.
+*   **Process**: Generate 1 Graph $\to$ Train on it for $N$ epochs $\to$ Discard.
+*   **Benefit**: The model "studies" the specific physics of that unique universe/graph before moving on.
 
 ### 3. Interleaved Tokenization
-Instead of one vector per variable, we use the TabPFN approach:
-*   Sequence: `[Feature_ID_0, Value_0, Feature_ID_1, Value_1, ...]`
-*   **Feature Tokens**: Learn structural identity and adjacency (Graph Discovery).
-*   **Value Tokens**: Learn immediate state and delta predictions (Effect Prediction).
+We treat Causal Discovery as a sequence-to-sequence problem (conceptually), but solve it with an Encoder.
+*   **Input**: `[ID_0, Val_0, ID_1, Val_1, ...]`
+*   **Intervention**: Marked via a learned `TypeEmbedding` added to the value token.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Usage
 
-### Installation
+### Requirements
+*   PyTorch 2.0+
+*   Reference Machine: 4x A100 (runs on 1 GPU fine via DDP auto-scaling).
+
+### Training (Single Command)
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Start fresh (Phase 3 Architectures are incompatible with old checkpoints)
+torchrun --nproc_per_node=4 main.py \
+    --epochs 5000 \
+    --lr 2e-5 \
+    --batch_size 16 \
+    --reuse_factor 5
 ```
 
-### Running the Experiment (Single Command)
-This command handles everything: data generation, curriculum learning, and multi-GPU distribution.
-
-```bash
-# Run on a single GPU (or CPU)
-python main.py --epochs 1000 --max_vars 50
-
-# Run on Multiple GPUs (DDP) - e.g., 4x A100
-torchrun --nproc_per_node=4 main.py --epochs 5000 --max_vars 100
-```
-
-### Options
-| Argument | Default | Description |
-| :--- | :--- | :--- |
-| `--min_vars` | 20 | Starting number of variables (Curriculum Level 0) |
-| `--max_vars` | 50 | Maximum variables to scale up to |
-| `--batch_size` | 32 | Batch size per GPU |
-| `--dry_run` | False | Run a single step to verify pipeline |
+### Key Arguments
+*   `--metrics`: Shows `MAE` (Physics Error) and `SHD` (Graph Error).
+*   `--reuse_factor`: How many times to repeat a graph (Default: 5).
+*   `--max_vars`: Maximum graph size (Default: 50).
 
 ---
 
-## 📂 Project Structure
+## 📂 Directory Structure
 
-*   `src/models/CausalTransformer.py`: **The Core Model**. Contains the Interleaved Encoder, Hyper-Network, and Expert Heads.
-*   `src/data/SCMGenerator.py`: **The Engine**. Generates random SCMs and implements "Twin World" noise logic.
-*   `src/data/CausalDataset.py`: **The Feeder**. Infinite iterable dataset that yields paired (Base, Twin) samples.
-*   `src/training/curriculum.py`: **The Coach**. Manages difficulty scaling (Vertices, Density, Ranges) based on validation MAE.
-*   `src/analysis/probe.py`: **The Auditor**. Linear probes to check if the model is learning implicit DAG structures.
-
-## 🔮 Future Work
-*   **Steering**: Actively maximizing Probe Accuracy during training to force standard transformers to learn structural representations.
-*   **Real Data**: Adapting the Hyper-Expert fine-tuning for real-world gene knockout datasets.
+```
+src/
+├── data/
+│   ├── SCMGenerator.py    # Physics Engine (Graphs, Functions)
+│   ├── CausalDataset.py   # Twin World Pipeline & Caching
+│   └── encoder.py         # Hybrid Embeddings (Fourier+Linear)
+├── models/
+│   └── CausalTransformer.py # Vectorized MoE + Backbone
+├── training/
+│   ├── loss.py            # Prioritized Loss (Delta > DAG)
+│   └── curriculum.py      # Difficulty Scheduler
+└── main.py                # DDP Entry Point
+```
