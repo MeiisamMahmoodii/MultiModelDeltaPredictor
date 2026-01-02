@@ -25,11 +25,15 @@ except ImportError:
 
 def setup_ddp():
     if "LOCAL_RANK" in os.environ:
-        dist.init_process_group("nccl")
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend)
         local_rank = int(os.environ["LOCAL_RANK"])
         import numpy as np
         np.random.seed(local_rank) # Ensure different data per rank
-        torch.cuda.set_device(local_rank)
+        
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        # MPS doesn't support set_device like CUDA, handled by device object later
         return local_rank
     return 0
 
@@ -81,7 +85,14 @@ def main():
     
     local_rank = setup_ddp()
     is_master = (local_rank == 0)
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    
+    device_name = "cpu"
+    if torch.cuda.is_available():
+        device_name = f"cuda:{local_rank}"
+    elif torch.backends.mps.is_available():
+        device_name = "mps"
+        
+    device = torch.device(device_name)
     
     if is_master:
         print(f"--- ISD-CP Unified Training ---")
@@ -236,9 +247,12 @@ def main():
             target = batch['target_row'].to(device)
             mask = batch['int_mask'].to(device)
             idx = batch['int_node_idx'].to(device)
-            
             # Forward
             deltas, logits, adj = model(base, int_s, target, mask, idx)
+            
+            # Heartbeat (Verbose Debugging for Freeze)
+            if i % 10 == 0 and is_master:
+                print(f"[HEARTBEAT] Epoch {epoch} | Step {i}/{steps_per_epoch} | Processing...", flush=True)
             
             
             # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
