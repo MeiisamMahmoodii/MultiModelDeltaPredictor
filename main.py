@@ -60,7 +60,7 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
         num_nodes_range=(num_vars, num_vars),
         samples_per_graph=64,
         infinite=False, # Important: Fixed size
-        validation_graphs=32
+        validation_graphs=64
     )
     return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
 
