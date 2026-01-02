@@ -42,7 +42,7 @@ def cleanup_ddp():
         dist.destroy_process_group()
 
 
-def get_validation_set(num_vars, device):
+def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
     """
     Generates a fixed validation set for a specific number of variables.
     Returns a DataLoader.
@@ -50,9 +50,9 @@ def get_validation_set(num_vars, device):
     # Fixed parameters for validation to be a fair benchmark
     gen = SCMGenerator(
         num_nodes=num_vars, 
-        edge_prob=0.2, # Average density
+        edge_prob=edge_prob, 
         noise_scale=1.0,
-        intervention_prob=0.5
+        intervention_prob=intervention_prob
     )
     # Generate 32 fixed graphs for validation
     dataset = CausalDataset(
@@ -62,8 +62,6 @@ def get_validation_set(num_vars, device):
         infinite=False, # Important: Fixed size
         validation_graphs=32
     )
-    return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
-
     return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
 
 def main():
@@ -180,7 +178,14 @@ def main():
                 print(f"Generating new Validation Set for {params['max_vars']} vars...")
             # We generate Val Set on all ranks to avoid broadcasting complexity for now 
             # (RNG seeded by local_rank, so each rank validates on its own slice)
-            val_loader = get_validation_set(params['max_vars'], device)
+            # Use current density (or fixed edge_prob) + current int_prob
+            curr_edge_prob = args.edge_prob if args.edge_prob is not None else params['density_max']
+            val_loader = get_validation_set(
+                params['max_vars'], 
+                device, 
+                edge_prob=curr_edge_prob,
+                intervention_prob=args.intervention_prob
+            )
             current_val_vars = params['max_vars']
             
         if is_master:
