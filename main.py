@@ -331,6 +331,9 @@ def main():
         
         # Validation Progress Bar
         val_progress = None
+        # Fixed val set: 64 graphs * 64 samples / 32 batch_size = 128 batches
+        val_steps = 128 
+        
         if is_master:
             print(f"Validating on Fixed Set...", flush=True)
             if RICH_AVAILABLE:
@@ -341,8 +344,6 @@ def main():
                     TimeRemainingColumn(),
                     TextColumn("[magenta]{task.fields[metrics]}")
                 )
-                # Fixed val set: 32 graphs * 64 samples / 32 batch_size = 64 batches
-                val_steps = 64
                 val_task = val_progress.add_task("[green]Validating", total=val_steps, metrics="MAE: ...")
                 val_progress.start()
 
