@@ -296,6 +296,8 @@ def main():
         model.eval()
         val_mae_sum = 0.0
         val_f1_sum = 0.0
+        val_tpr_sum = 0.0
+        val_fdr_sum = 0.0
         val_batches = 0
         
         # Validation Progress Bar
@@ -328,9 +330,12 @@ def main():
                 # Metrics
                 batch_mae = compute_mae(deltas, val_batch['delta'].to(device))
                 batch_f1 = compute_f1(logits, val_batch['adj'].to(device))
+                batch_tpr, batch_fdr = compute_tpr_fdr(logits, val_batch['adj'].to(device))
                 
                 val_mae_sum += batch_mae
                 val_f1_sum += batch_f1
+                val_tpr_sum += batch_tpr
+                val_fdr_sum += batch_fdr
                 val_batches += 1
                 
                 if is_master and val_progress:
@@ -341,11 +346,14 @@ def main():
                 
         val_mae = val_mae_sum / max(1, val_batches)
         val_f1 = val_f1_sum / max(1, val_batches)
+        val_tpr = val_tpr_sum / max(1, val_batches)
+        val_fdr = val_fdr_sum / max(1, val_batches)
         
         # Step Scheduler
         scheduler.step(val_mae)
         
         # Calculate Epoch Metrics (Training Avg)
+        i = max(1, i) # Avoid div by zero if loop didn't run
         avg_loss = total_loss / (max(1, i+1))
         # avg_mae = total_metrics['mae'] / (max(1, i+1)) # Using Validation MAE for curriculum now
         avg_shd = total_metrics['shd'] / (max(1, i+1)) 
@@ -365,6 +373,7 @@ def main():
                 table.add_row("MAE (L1)", f"{total_metrics['mae']/(i+1):.4f}", f"{val_mae:.4f}")
                 table.add_row("SHD", f"{avg_shd:.2f}", "-")
                 table.add_row("F1 Score", f"{total_metrics['f1']/(i+1):.4f}", f"{val_f1:.4f}")
+                table.add_row("TPR", f"{total_metrics['tpr']/(i+1):.4f}", f"{val_tpr:.4f}")
                 table.add_row("LR", f"{optimizer.param_groups[0]['lr']:.2e}", "")
                 
                 rprint(table)
@@ -380,18 +389,31 @@ def main():
             file_exists = os.path.isfile(log_file)
             with open(log_file, mode='a', newline='') as f:
                 writer = csv.writer(f)
+                header = ["Epoch", "Level", "LR", 
+                          "Train_Loss", "Train_Delta", "Train_DAG", "Train_H", 
+                          "Train_MAE", "Train_SHD", "Train_F1", "Train_TPR", "Train_FDR", 
+                          "Val_MAE", "Val_F1", "Val_TPR", "Val_FDR"]
                 if not file_exists:
-                    writer.writerow(["Epoch", "Level", "LR", "Train_Loss", "Train_MAE", "Train_SHD", "Train_F1", "Val_MAE", "Val_F1"])
+                    writer.writerow(header)
+                
+                train_iters = max(1, i+1) # total training iterations this epoch
                 writer.writerow([
                     epoch, 
                     curriculum.current_level,
                     optimizer.param_groups[0]['lr'],
                     f"{avg_loss:.4f}",
-                    f"{total_metrics['mae']/(i+1):.4f}",
+                    f"{total_metrics['delta']/train_iters:.4f}",
+                    f"{total_metrics['dag']/train_iters:.4f}",
+                    f"{total_metrics['h']/train_iters:.4f}",
+                    f"{total_metrics['mae']/train_iters:.4f}",
                     f"{avg_shd:.4f}",
-                    f"{total_metrics['f1']/(i+1):.4f}",
+                    f"{total_metrics['f1']/train_iters:.4f}",
+                    f"{total_metrics['tpr']/train_iters:.4f}",
+                    f"{total_metrics['fdr']/train_iters:.4f}",
                     f"{val_mae:.4f}",
-                    f"{val_f1:.4f}"
+                    f"{val_f1:.4f}",
+                    f"{val_tpr:.4f}",
+                    f"{val_fdr:.4f}"
                 ])
         
         # 3. Save Checkpoint (Master Only)
