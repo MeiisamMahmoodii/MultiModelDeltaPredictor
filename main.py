@@ -56,13 +56,13 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
         noise_scale=1.0,
         intervention_prob=intervention_prob
     )
-    # Generate 32 fixed graphs for validation
+    # Generate 16 fixed graphs for validation (Speed Optimization)
     dataset = CausalDataset(
         gen, 
         num_nodes_range=(num_vars, num_vars),
-        samples_per_graph=64,
-        infinite=False, # Important: Fixed size
-        validation_graphs=64
+        samples_per_graph=32, # Reduced from 64
+        infinite=False, 
+        validation_graphs=16 # Reduced from 64 (Total Explosion Prevention)
     )
     return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
 
@@ -180,13 +180,14 @@ def main():
                 print(f"Generating new Validation Set for {params['max_vars']} vars...")
             # We generate Val Set on all ranks to avoid broadcasting complexity for now 
             # (RNG seeded by local_rank, so each rank validates on its own slice)
-            # Use current density (or fixed edge_prob) + current int_prob
+            # Use current density (or fixed edge_prob) 
+            # Force int_prob=0.1 for Validation to prevent dataset explosion
             curr_edge_prob = args.edge_prob if args.edge_prob is not None else params['density_max']
             val_loader = get_validation_set(
                 params['max_vars'], 
                 device, 
                 edge_prob=curr_edge_prob,
-                intervention_prob=args.intervention_prob
+                intervention_prob=0.1
             )
             current_val_vars = params['max_vars']
             
