@@ -148,8 +148,8 @@ class CausalTransformer(nn.Module):
         # 1. Interleaved Encoding (With Hybrid Value Embeddings)
         self.encoder = InterleavedEncoder(num_nodes, d_model)
         
-        # 2. Strong Backbone
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, activation="gelu", batch_first=True)
+        # 2. Strong Backbone (Pre-Norm for Stability)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, activation="gelu", batch_first=True, norm_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         # 3. Universal MoE Layer (Vectorized)
