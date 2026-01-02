@@ -1,6 +1,9 @@
 import argparse
+import random
+import csv
 import os
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -371,6 +374,25 @@ def main():
                 print(f"Ep {epoch}|L:{avg_loss:.2f}|TrMAE:{total_metrics['mae']/(i+1):.2f}|ValMAE:{val_mae:.2f}|LR:{optimizer.param_groups[0]['lr']:.2e}")
                 if leveled_up:
                     print(f"*** LEVEL UP! Advanced to Level {curriculum.current_level} ***")
+            
+            # 2b. CSV Logging
+            log_file = "training_log.csv"
+            file_exists = os.path.isfile(log_file)
+            with open(log_file, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["Epoch", "Level", "LR", "Train_Loss", "Train_MAE", "Train_SHD", "Train_F1", "Val_MAE", "Val_F1"])
+                writer.writerow([
+                    epoch, 
+                    curriculum.current_level,
+                    optimizer.param_groups[0]['lr'],
+                    f"{avg_loss:.4f}",
+                    f"{total_metrics['mae']/(i+1):.4f}",
+                    f"{avg_shd:.4f}",
+                    f"{total_metrics['f1']/(i+1):.4f}",
+                    f"{val_mae:.4f}",
+                    f"{val_f1:.4f}"
+                ])
         
         # 3. Save Checkpoint (Master Only)
         if is_master:
