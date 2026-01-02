@@ -255,11 +255,6 @@ def main():
             # Forward
             deltas, logits, adj = model(base, int_s, target, mask, idx)
             
-            # Heartbeat (Verbose Debugging for Freeze)
-            if i % 10 == 0 and is_master:
-                print(f"[HEARTBEAT] Epoch {epoch} | Step {i}/{steps_per_epoch} | Processing...", flush=True)
-            
-            
             # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
             loss, items = causal_loss_fn(
                 deltas, 
