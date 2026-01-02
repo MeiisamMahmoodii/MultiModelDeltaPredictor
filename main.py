@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--intervention_prob", type=float, default=0.5, help="Probability of intervening on a node")
     parser.add_argument("--dry_run", action="store_true", help="Run 1 step to verify pipeline")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
-    parser.add_argument("--reuse_factor", type=int, default=2, help="Reuse each generated graph N times")
+    parser.add_argument("--reuse_factor", type=int, default=1, help="Reuse each generated graph N times")
     parser.add_argument("--checkpoint_path", type=str, default="last_checkpoint.pt", help="Path to checkpoint")
     
     args = parser.parse_args()
@@ -93,7 +93,8 @@ def main():
 
     # 1. Model
     # Max vars + buffer for embeddings
-    model = CausalTransformer(num_nodes=args.max_vars + 5)
+    # Increased d_model to 512 for Phase 3 "Physics-Native" Capacity
+    model = CausalTransformer(num_nodes=args.max_vars + 5, d_model=512)
     model.to(device)
     
     if is_master:
@@ -116,8 +117,11 @@ def main():
     # For V1 Unification, let's run a simple loop here.
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.9, patience=5
+    
+    # Scheduler: Cosine Annealing with Warm Restarts
+    # Restart every 50 epochs, doubling the period each time (T_mult=2)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=50, T_mult=2, eta_min=1e-8
     )
     
     start_epoch = 0
@@ -349,8 +353,8 @@ def main():
         val_tpr = val_tpr_sum / max(1, val_batches)
         val_fdr = val_fdr_sum / max(1, val_batches)
         
-        # Step Scheduler
-        scheduler.step(val_mae)
+        # Step Scheduler (Cosine uses epoch, not val metric)
+        scheduler.step(epoch + i / steps_per_epoch) # Update with partial epoch for smoother cosine
         
         # Calculate Epoch Metrics (Training Avg)
         i = max(1, i) # Avoid div by zero if loop didn't run
