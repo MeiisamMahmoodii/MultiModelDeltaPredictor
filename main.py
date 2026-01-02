@@ -363,9 +363,14 @@ def main():
                 
                 if is_master and val_progress:
                      val_progress.update(val_task, advance=1, metrics=f"MAE: {val_mae_sum/val_batches:.3f}")
+                elif is_master:
+                     # ASCII Fallback
+                     print(f"\r[Validating] Step {val_batches}/{val_steps} | MAE: {val_mae_sum/val_batches:.3f}", end='', flush=True)
 
         if is_master and val_progress:
             val_progress.stop()
+        elif is_master:
+            print(flush=True) # Newline after ASCII Val Bar
                 
         val_mae = val_mae_sum / max(1, val_batches)
         val_f1 = val_f1_sum / max(1, val_batches)
