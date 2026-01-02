@@ -71,6 +71,7 @@ def main():
     parser.add_argument("--max_vars", type=int, default=50)
     parser.add_argument("--edge_prob", type=float, default=None, help="Fixed edge probability (overrides curriculum)")
     parser.add_argument("--intervention_prob", type=float, default=0.5, help="Probability of intervening on a node")
+    parser.add_argument("--num_layers", type=int, default=16, help="Transformer Depth")
     parser.add_argument("--dry_run", action="store_true", help="Run 1 step to verify pipeline")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     parser.add_argument("--reuse_factor", type=int, default=1, help="Reuse each generated graph N times")
@@ -94,7 +95,11 @@ def main():
     # 1. Model
     # Max vars + buffer for embeddings
     # Increased d_model to 512 for Phase 3 "Physics-Native" Capacity
-    model = CausalTransformer(num_nodes=args.max_vars + 5, d_model=512)
+    model = CausalTransformer(
+        num_nodes=args.max_vars + 5, 
+        d_model=512,
+        num_layers=args.num_layers
+    )
     model.to(device)
     
     if is_master:
