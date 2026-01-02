@@ -2,6 +2,7 @@ import argparse
 import random
 import csv
 import os
+from datetime import timedelta
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -26,7 +27,8 @@ except ImportError:
 def setup_ddp():
     if "LOCAL_RANK" in os.environ:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend)
+        # Increase timeout to 30 mins for complex graph generation
+        dist.init_process_group(backend, timeout=timedelta(minutes=30))
         local_rank = int(os.environ["LOCAL_RANK"])
         import numpy as np
         np.random.seed(local_rank) # Ensure different data per rank
@@ -314,6 +316,10 @@ def main():
         if is_master:
             if progress: progress.stop()
             if not RICH_AVAILABLE: print(flush=True) # Newline after ASCII bar
+            
+        # Synchronize before validation to prevent timeouts
+        if dist.is_initialized():
+            dist.barrier()
             
         # --- Validation Loop (Fixed Set) ---
         model.eval()
