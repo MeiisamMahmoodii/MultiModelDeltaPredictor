@@ -62,7 +62,8 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
         num_nodes_range=(num_vars, num_vars),
         samples_per_graph=32, # Reduced from 64
         infinite=False, 
-        validation_graphs=16 # Reduced from 64 (Total Explosion Prevention)
+        validation_graphs=16, # Reduced from 64
+        intervention_prob=intervention_prob # Vital: Must match generator
     )
     return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
 
@@ -332,8 +333,12 @@ def main():
         
         # Validation Progress Bar
         val_progress = None
-        # Fixed val set: 64 graphs * 64 samples / 32 batch_size = 128 batches
-        val_steps = 128 
+        # Dynamic calculation based on current params (approximate but closer)
+        # Scenarios = 1 (Base) + (Vars * IntProb * 3 Values)
+        # Total Steps = Graphs * Scenarios * SamplesPerGraph / BatchSize
+        # Defaults: Graphs=16, IntProb=0.1, Samples=32, Batch=32
+        est_scenarios = 1 + int(current_val_vars * 0.1 * 3)
+        val_steps = 16 * est_scenarios * 32 // 32
         
         if is_master:
             print(f"Validating on Fixed Set...", flush=True)
