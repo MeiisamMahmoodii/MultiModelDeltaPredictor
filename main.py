@@ -355,7 +355,7 @@ def main():
                 val_progress.start()
 
         with torch.no_grad():
-            for i, val_batch in enumerate(val_loader):
+            for val_i, val_batch in enumerate(val_loader):
                 base = val_batch['base_samples'].to(device)
                 int_s = val_batch['int_samples'].to(device)
                 target = val_batch['target_row'].to(device)
