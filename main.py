@@ -122,9 +122,9 @@ def main():
     
     if dist.is_initialized():
         print("Moving to DDP...")
-        # find_unused_parameters=True uses extra memory and overhead.
-        # We disable it for OOM fix. If MoE causes unused params error, we must ensure load balancing.
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+        # find_unused_parameters=True is required for Hard MoE (sparse activation).
+        # We must solve OOM via Batch Size / Gradient Checkpointing.
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     # 2. Data & Curriculum
     curriculum = CurriculumManager(min_vars=args.min_vars, max_vars=args.max_vars)
