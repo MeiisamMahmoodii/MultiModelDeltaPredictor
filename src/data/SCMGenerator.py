@@ -127,7 +127,7 @@ class SCMGenerator:
                 # Standard Additive Model
                 total += sum(terms)
                 
-            data[node] = np.clip(total, -20, 20)
+            data[node] = np.clip(total, -100, 100)
         return data, noise
 
     def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True):
