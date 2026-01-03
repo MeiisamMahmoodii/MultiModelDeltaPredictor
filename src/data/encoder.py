@@ -73,14 +73,15 @@ class InterleavedEncoder(nn.Module):
         # Hybrid Strategy: Linear + Fourier + MLP
         self.value_emb = HybridEmbedding(d_model)
         
-        # 3. Type Embedding: "Am I Observed or Intervened?"
-        self.type_emb = nn.Embedding(2, d_model) # 0=Obs, 1=Int
+        # 3. Type Embedding: "Am I Observed, Intervened, or Masked?"
+        # 0=Obs, 1=Int, 2=Masked
+        self.type_emb = nn.Embedding(3, d_model)
 
     def forward(self, base_samples, int_samples, target_row, int_mask):
         """
         Args:
-            target_row: (B, N) - The sample we are processing
-            int_mask: (B, N) - 1.0 where intervened
+            target_row: (B, N) - The sample we are processing (or Zero if Masked)
+            int_mask: (B, N) - 0=Obs, 1=Int, 2=Masked (If passing combined mask)
         Returns:
             tokens: (B, 2N, D)
         """

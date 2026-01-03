@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from src.data.encoder import InterleavedEncoder
+from src.models.rope import RotaryEmbedding, apply_rotary_pos_emb
 
 def gumbel_sigmoid(logits, tau=1.0, hard=False):
     gumbels = -torch.empty_like(logits).exponential_().log()
@@ -51,8 +52,6 @@ class VectorizedSwiGLUResBlock(nn.Module):
         
     def forward(self, x):
         # x: (Tokens, Experts, d_model) - Input already expanded to experts
-        # OR x: (Tokens, d_model) broadcast?
-        # Let's assume input is (Tokens, Experts, d_model) so each expert has its own input stream
         
         residual = x
         x = self.norm(x) # RMSNorm applies to last dim
@@ -94,6 +93,7 @@ class VectorizedDeepExpert(nn.Module):
 class MoELayer(nn.Module):
     """
     Vectorized Mixture of Experts Layer.
+    Refactored for Hard Gumbel Routing (Scenario 7).
     """
     def __init__(self, d_model, num_experts=8, num_layers_per_expert=4):
         super().__init__()
@@ -113,11 +113,12 @@ class MoELayer(nn.Module):
         
         # Flatten: (Total_Tokens, d_model)
         x_flat = x.flatten(0, 1)
-        total_tokens = x_flat.size(0)
         
-        # 1. Router
+        # 1. Router (Hard Gumbel Switch)
         logits = self.router(x_flat) # (Total, Experts)
-        weights = F.softmax(logits, dim=-1) # (Total, Experts)
+        # Use Gumbel Softmax (Hard=True) for crisp expert selection
+        # During training, this uses straight-through estimator
+        weights = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1) # (Total, Experts)
         
         # 2. Vectorized Execution
         # We broadcast x to all experts: (Total, Experts, d_model)
@@ -126,67 +127,198 @@ class MoELayer(nn.Module):
         # Run all experts in parallel
         expert_outputs = self.experts(x_expanded) # (Total, Experts)
         
-        # 3. Weighted Sum
+        # 3. Weighted Sum (In Hard mode, this selects exactly one expert per token)
         output = (expert_outputs * weights).sum(dim=1) # (Total, )
         
         # Reshape back to batch: (Batch, Num_Active)
-        # Was (Batch, Num_Active, 1) -> Caused broadcasting error with (Batch, Num_Active) target
         return output.view(batch_size, num_active)
+
+class RoPEAttentionLayer(nn.Module):
+    """
+    Custom Transformer Layer with Rotary Positional Embeddings.
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        # Implementation Note: PyTorch MHA doesn't easily expose Q/K for RoPE.
+        # So we use a simplified manual Attention or accept that we rotate X before MHA?
+        # Rotating X before MHA corresponds to xPos-like behavior but isn't strict RoPE.
+        # Strict RoPE requires rotating Q and K *after* linear projection but *before* dot product.
+        # To do this correctly without rewriting MHA, we use a manual attention implementation OR
+        # since PyTorch 2.1 SDPA allows it, but for compatibility here we might write a simple
+        # FlashAttention-like wrapper if we want speed.
+        #
+        # DECISION: For stability and simplicity in "Physics First" phase, 
+        # let's assume we implement a basic custom Attention block.
+        
+        self.head_dim = d_model // nhead
+        self.nhead = nhead
+        self.d_model = d_model
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        # Feed Forward
+        self.norm1 = nn.LayerNorm(d_model) # (Or RMSNorm if preferred)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Linear(dim_feedforward, d_model)
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, rotary_emb=None):
+        # x: (Batch, Seq, D)
+        B, S, D = x.shape
+        
+        # Residual 1
+        residual = x
+        x = self.norm1(x)
+        
+        # QKV
+        q = self.w_q(x).view(B, S, self.nhead, self.head_dim).transpose(1, 2) # (B, H, S, Hd)
+        k = self.w_k(x).view(B, S, self.nhead, self.head_dim).transpose(1, 2)
+        v = self.w_v(x).view(B, S, self.nhead, self.head_dim).transpose(1, 2)
+        
+        # Apply RoPE
+        if rotary_emb is not None:
+            cos, sin = rotary_emb(v, seq_len=S) # Get cos/sin for this sequence length
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+            
+        # Attention
+        # scaled_dot_product_attention handles masking/dropout efficiently
+        # We don't have causal mask logic passed here yet, generally is_causal=False for "All-to-All"
+        # unless we were masking for DAG (Scenario 2). For now, All-to-All.
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.1)
+        
+        out = out.transpose(1, 2).contiguous().view(B, S, D)
+        out = self.w_o(out)
+        x = residual + self.dropout(out)
+        
+        # Residual 2
+        residual = x
+        x = self.norm2(x)
+        x = self.mlp(x)
+        x = residual + self.dropout(x)
+        
+        return x
+
+class RoPETransformer(nn.Module):
+    """
+    Stack of RoPE Layers. Replacement for nn.TransformerEncoder.
+    """
+    def __init__(self, d_model, nhead, num_layers, max_len=2048):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            RoPEAttentionLayer(d_model, nhead) for _ in range(num_layers)
+        ])
+        self.rope = RotaryEmbedding(d_model // nhead, max_position_embeddings=max_len)
+        
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x, self.rope)
+        return x
 
 class CausalTransformer(nn.Module):
     """
-    Unified Causal Transformer (Phase 3 "Physics-Native")
+    Unified Causal Transformer (Phase 4 "Physics-First")
     Features:
-    - HybridValueEncoding (Fourier+MLP+Linear)
-    - Vectorized MoE
-    - Universal Multi-Node Interventions
+    - RoPE (Relative Positions)
+    - Vectorized MoE (Hard Gumbel)
+    - Recurrent Refinement (3-step)
+    - NO DAG HEAD (Decoupled)
     """
     def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12):
         super().__init__()
         self.num_nodes = num_nodes
         
-        # 1. Interleaved Encoding (With Hybrid Value Embeddings)
+        # 1. Interleaved Encoding
         self.encoder = InterleavedEncoder(num_nodes, d_model)
         
-        # 2. Strong Backbone (Pre-Norm for Stability)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, activation="gelu", batch_first=True, norm_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # 2. RoPE Backbone (Replaces standard TransformerEncoder)
+        self.transformer = RoPETransformer(d_model, nhead, num_layers, max_len=num_nodes*2 + 10)
         
-        # 3. Universal MoE Layer (Vectorized)
+        # 3. Universal MoE Layer (Hard Gumbel)
         self.moe = MoELayer(d_model, num_experts=8, num_layers_per_expert=4)
         
-        # 4. Sparse Structure Learning
-        self.dag_parent = nn.Linear(d_model, d_model)
-        self.dag_child = nn.Linear(d_model, d_model)
-        self.tau = 1.0
+        # 4. Masked Causal Modeling Head (Pre-training)
+        self.mcm_head = nn.Linear(d_model, 1)
 
-    def forward(self, base_samples, int_samples, target_row, int_mask, int_node_idx=None):
-        # Note: int_node_idx is DEPRECATED and ignored (kept for API compatibility)
+    def forward(self, base_samples, int_samples, target_row, int_mask, int_node_idx=None, mcm_mask=None):
+        """
+        Input:
+            mcm_mask: (B, N) or None. If present, 1.0 means this token is masked.
+        """
+        # Pass 1: Initial Guess
+        deltas_1, mcm_out = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
         
-        # Encodings: (B, 2N, D)
-        # InterleavedEncoder handles the 'TypeEmbedding' (Observed vs Intervened)
-        # using 'int_mask'.
-        x = self.encoder(base_samples, int_samples, target_row, int_mask)
-        x = self.transformer(x) 
+        if mcm_mask is not None:
+             B, N = base_samples.shape
+             dummy_logits = torch.zeros(B, N, N, device=base_samples.device)
+             dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
+             return deltas_1, dummy_logits, dummy_adj, mcm_out
         
-        feature_tokens = x[:, 0::2, :] # (B, N, D)
+        
+        # Pass 2: Refinement (Recurrent)
+        # Broadcast deltas (B, N) to (B, Context, N) if base_samples has context dim
+        if len(base_samples.shape) == 3:
+             refined_base = base_samples + deltas_1.unsqueeze(1)
+        else:
+             refined_base = base_samples + deltas_1
+        deltas_2, _ = self._forward_pass(refined_base, int_samples, target_row, int_mask, None)
+        
+        
+        # Pass 3: Final Polish
+        if len(base_samples.shape) == 3:
+             refined_base_2 = base_samples + deltas_2.unsqueeze(1)
+        else:
+             refined_base_2 = base_samples + deltas_2
+        deltas_final, _ = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None)
+        
+        
+        # Returning Dummy Logits/Adj for API compatibility with main.py metrics
+        if len(base_samples.shape) == 3:
+            B, S, N = base_samples.shape
+        else:
+            B, N = base_samples.shape
+            
+        dummy_logits = torch.zeros(B, N, N, device=base_samples.device)
+        dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
+        
+        return deltas_final, dummy_logits, dummy_adj, None
+
+    def _forward_pass(self, base_samples, int_samples, target_row, int_mask, mcm_mask):
+        # Prepare inputs for Encoder (Handle masking)
+        enc_int_mask = int_mask
+        enc_target = target_row
+        
+        if mcm_mask is not None:
+            # Clone to avoid in-place modification of inputs which might be used later?
+            # Creating combined mask: 2 if Masked, else int_mask
+            enc_int_mask = int_mask.clone()
+            enc_int_mask[mcm_mask.bool()] = 2.0 # Type 2 = Masked
+            
+            # Zero out the values
+            enc_target = target_row.clone()
+            enc_target[mcm_mask.bool()] = 0.0
+            
+        # Shared Forward Logic
+        x = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
+        x = self.transformer(x)
+        
         value_tokens = x[:, 1::2, :]   # (B, N, D)
-        
-        # --- Value Delta Prediction ---
-        # No HyperNet. The 'value_tokens' already contain context from 'int_mask' 
-        # via the Transformer's self-attention mixing.
-        # We pass directly to MoE.
         deltas = self.moe(value_tokens)
         
-        # --- Structural Discovery ---
-        p = self.dag_parent(feature_tokens)
-        c = self.dag_child(feature_tokens)
-        logits = torch.matmul(p, c.transpose(-2, -1))
-        
-        adj_sampled = gumbel_sigmoid(logits, tau=self.tau, hard=self.training)
-        
-        return deltas, logits, adj_sampled
+        mcm_out = None
+        if mcm_mask is not None:
+            mcm_out = self.mcm_head(value_tokens).squeeze(-1) # (B, N)
+            
+        return deltas, mcm_out
 
     def anneal_temperature(self, epoch, total_epochs):
-        self.tau = max(0.1, 1.0 - (epoch / total_epochs))
-        return self.tau
+        # No tau needed for Gumbel (Hard=True)
+        return 1.0
+

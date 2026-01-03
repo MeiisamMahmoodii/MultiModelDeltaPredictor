@@ -16,20 +16,20 @@ def compute_h_loss(adj_matrix):
 def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj, 
                    lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0):
     loss_delta = nn.functional.huber_loss(pred_delta, true_delta)
-    loss_dag = nn.functional.binary_cross_entropy_with_logits(pred_adj, true_adj)
     
-    pred_prob = torch.sigmoid(pred_adj)
-    batch_h = []
-    # Loop over batch for trace calc
-    for i in range(pred_adj.shape[0]):
-        batch_h.append(compute_h_loss(pred_prob[i]))
-    loss_h = torch.stack(batch_h).mean()
+    # Phase 4: Decoupled Learning (No DAG Head)
+    # We ignore pred_adj and true_adj for now
+    loss_dag = torch.tensor(0.0, device=pred_delta.device)
+    loss_h = torch.tensor(0.0, device=pred_delta.device)
     
-    loss_l1 = torch.norm(pred_prob, p=1) / pred_adj.numel()
+    total_loss = loss_delta * lambda_delta
     
-    total_loss = (lambda_delta * loss_delta + 
-                  lambda_dag * loss_dag + 
-                  lambda_h * loss_h + 
-                  lambda_l1 * loss_l1)
-    
-    return total_loss, {"delta": loss_delta.item(), "dag": loss_dag.item(), "h": loss_h.item()}
+    return total_loss, {"delta": loss_delta.item(), "dag": 0.0, "h": 0.0}
+
+def mcm_loss_fn(pred_values, true_values, mask_indices):
+    """
+    Masked Causal Modeling Loss.
+    """
+    # Only calculate loss on masked tokens
+    loss = nn.functional.mse_loss(pred_values[mask_indices], true_values[mask_indices])
+    return loss

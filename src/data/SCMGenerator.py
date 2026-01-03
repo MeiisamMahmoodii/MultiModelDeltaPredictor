@@ -3,6 +3,8 @@ import pandas as pd
 import networkx as nx
 import torch
 
+from typing import List, Optional
+
 class SCMGenerator:
     def __init__(
         self,
@@ -11,8 +13,8 @@ class SCMGenerator:
         noise_scale: float = 1.0,
         num_samples_per_intervention: int = 100,
         intervention_prob: float = 0.3,
-        intervention_values: list[float] | None = None,
-        seed: int | None = None,
+        intervention_values: Optional[List[float]] = None,
+        seed: Optional[int] = None,
     ):
         self.num_nodes = num_nodes
         self.edge_prob = edge_prob
@@ -27,7 +29,7 @@ class SCMGenerator:
         if seed is not None:
             np.random.seed(seed)
 
-    def generate_dag(self, num_nodes: int | None = None, edge_prob: float | None = None, seed: int | None = None):
+    def generate_dag(self, num_nodes: Optional[int] = None, edge_prob: Optional[float] = None, seed: Optional[int] = None):
         if seed is None: seed = self.seed
         if seed is not None: np.random.seed(seed)
         if num_nodes is None: num_nodes = self.num_nodes

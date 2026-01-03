@@ -256,8 +256,8 @@ def main():
             target = batch['target_row'].to(device)
             mask = batch['int_mask'].to(device)
             idx = batch['int_node_idx'].to(device)
-            # Forward
-            deltas, logits, adj = model(base, int_s, target, mask, idx)
+            # Forward (Phase 4: Returns deltas, logits, adj, mcm_out)
+            deltas, logits, adj, _ = model(base, int_s, target, mask, idx)
             
             # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
             loss, items = causal_loss_fn(
@@ -361,7 +361,7 @@ def main():
                 mask = val_batch['int_mask'].to(device)
                 idx = val_batch['int_node_idx'].to(device)
                 
-                deltas, logits, adj = model(base, int_s, target, mask, idx)
+                deltas, logits, adj, _ = model(base, int_s, target, mask, idx)
                 
                 # Metrics
                 batch_mae = compute_mae(deltas, val_batch['delta'].to(device))
