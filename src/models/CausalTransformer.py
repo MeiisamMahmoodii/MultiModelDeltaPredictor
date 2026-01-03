@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from src.data.encoder import InterleavedEncoder
 from src.models.rope import RotaryEmbedding, apply_rotary_pos_emb
 
@@ -231,9 +232,10 @@ class CausalTransformer(nn.Module):
     - Recurrent Refinement (3-step)
     - NO DAG HEAD (Decoupled)
     """
-    def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12):
+    def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12, grad_checkpoint=False):
         super().__init__()
         self.num_nodes = num_nodes
+        self.grad_checkpoint = grad_checkpoint
         
         # 1. Interleaved Encoding
         self.encoder = InterleavedEncoder(num_nodes, d_model)
@@ -253,7 +255,11 @@ class CausalTransformer(nn.Module):
             mcm_mask: (B, N) or None. If present, 1.0 means this token is masked.
         """
         # Pass 1: Initial Guess
-        deltas_1, mcm_out = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
+        if self.grad_checkpoint and self.training:
+            # Inputs to pass 1 don't require grad, so use_reentrant=False is mandatory for checkpoint to work
+            deltas_1, mcm_out = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, use_reentrant=False)
+        else:
+            deltas_1, mcm_out = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
         
         if mcm_mask is not None:
              B, N = base_samples.shape
@@ -268,7 +274,11 @@ class CausalTransformer(nn.Module):
              refined_base = base_samples + deltas_1.unsqueeze(1)
         else:
              refined_base = base_samples + deltas_1
-        deltas_2, _ = self._forward_pass(refined_base, int_samples, target_row, int_mask, None)
+             
+        if self.grad_checkpoint and self.training:
+            deltas_2, _ = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, use_reentrant=False)
+        else:
+            deltas_2, _ = self._forward_pass(refined_base, int_samples, target_row, int_mask, None)
         
         
         # Pass 3: Final Polish
@@ -276,7 +286,11 @@ class CausalTransformer(nn.Module):
              refined_base_2 = base_samples + deltas_2.unsqueeze(1)
         else:
              refined_base_2 = base_samples + deltas_2
-        deltas_final, _ = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None)
+             
+        if self.grad_checkpoint and self.training:
+             deltas_final, _ = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, use_reentrant=False)
+        else:
+             deltas_final, _ = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None)
         
         
         # Returning Dummy Logits/Adj for API compatibility with main.py metrics

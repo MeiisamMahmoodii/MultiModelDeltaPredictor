@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     parser.add_argument("--reuse_factor", type=int, default=1, help="Reuse each generated graph N times")
     parser.add_argument("--checkpoint_path", type=str, default="last_checkpoint.pt", help="Path to checkpoint")
+    parser.add_argument("--grad_checkpoint", action="store_true", help="Enable gradient checkpointing (Saves Memory)")
     
     args = parser.parse_args()
     
@@ -110,7 +111,8 @@ def main():
     model = CausalTransformer(
         num_nodes=args.max_vars + 5, 
         d_model=512,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        grad_checkpoint=args.grad_checkpoint
     )
     model.to(device)
     
