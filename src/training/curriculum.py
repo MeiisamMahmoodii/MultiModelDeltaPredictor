@@ -48,9 +48,9 @@ class CurriculumManager:
         params = self.get_current_params()
         n_vars = params['max_vars']
         
-        if n_vars <= 25: thresh = 1.0
-        elif n_vars <= 35: thresh = 1.5
-        else: thresh = 2.0
+        if n_vars <= 25: thresh = 5.0
+        elif n_vars <= 35: thresh = 7.5
+        else: thresh = 10.0
         
         if val_mae < thresh:
             self.stability_counter += 1
