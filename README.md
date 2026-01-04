@@ -55,11 +55,72 @@ graph TD
 ### Key Components
 
 #### 1. RoPE (Rotary Positional Embeddings)
+```mermaid
+graph LR
+    subgraph "Absolute Position"
+    Vec["Vector [x1, x2]"] -->|Rotate by m*theta| Rot["Rotated [x1', x2']"]
+    end
+    
+    subgraph "Attention"
+    Rot -->|Dot Product| Score["Relative Score (Depends on m-n)"]
+    end
+    
+    style Vec fill:#eee,stroke:#333
+    style Rot fill:#bbf,stroke:#333
+    style Score fill:#bfb,stroke:#333
+```
 *   **Purpose**: Standard transformers use absolute positions ($0, 1, 2...$). In a causal graph, node $i$ and node $j$ might be far apart in the list but close in the graph. RoPE encodes "Relative Distance" mathematically.
 *   **Mechanism**: It rotates the Query and Key vectors in the complex plane by an angle proportional to their position.
 *   **Benefit**: This allows the attention mechanism to understand *relative* relationships (e.g., "Input $X$ is the value immediately following Node ID $Y$") regardless of where they appear in the total sequence.
 
+## 🛠️ Data Pipeline ("Physics 2.0")
+
+```mermaid
+graph TD
+    subgraph "Step 1: The Universe"
+    SCM["SCM Generator"] -->|Random Functions| Graph["Physical Laws (DAG)"]
+    end
+    
+    subgraph "Step 2: Twin Worlds"
+    Graph -->|Noise Z| World1["World 1 (Observed)"]
+    Graph -->|Noise Z + Intervention| World2["World 2 (Intervened)"]
+    end
+    
+    subgraph "Step 3: Sampling"
+    World1 -->|Subtract| Delta["True Delta"]
+    World2 -->|Tokenize| Input["Model Input"]
+    end
+    
+    style SCM fill:#f9f,stroke:#333
+    style World1 fill:#bbf,stroke:#333
+    style World2 fill:#bfb,stroke:#333
+```
+
+### SCM Generator
+We simulate complex physical systems, not just linear graphs.
+
 #### 2. Hard MoE (Mixture of Experts) with Gumbel-Softmax
+```mermaid
+graph TD
+    Token["Input Token"] --> Router["Router Network"]
+    
+    Router -->|Logits| Gumbel["Gumbel-Softmax (Hard)"]
+    Gumbel -->|Index=2| Switch{Switch}
+    
+    subgraph "Physics Experts"
+    E1["Expert 1 (Linear)"]
+    E2["Expert 2 (Sine)"]
+    E3["Expert 3 (Threshold)"]
+    E8["Expert 8 (Chaos)"]
+    end
+    
+    Switch -->|Route Token| E3
+    E3 -->|Output| Result["Specialized Pred"]
+    
+    style Token fill:#eee,stroke:#333
+    style Gumbel fill:#f9f,stroke:#333
+    style E3 fill:#bfb,stroke:#333
+```
 *   **Purpose**: Physical laws are distinct (e.g., a "Threshold" function behaves differently from a "Sine Wave"). A single dense network blurs them.
 *   **Mechanism**:
     *   We use 8 Vectorized Experts.
@@ -68,6 +129,22 @@ graph TD
 *   **Benefit**: This forces specialization. One expert becomes the "Sine Wave Specialist", another the "Linear Specialist", preventing interference between conflicting physical laws.
 
 #### 3. Dual Heads (Unified Output)
+```mermaid
+graph TD
+    Unified["Refined Representation"] -->|Split| H1
+    Unified -->|Split| H2
+    
+    subgraph "Head 1: Physics"
+    H1["MLP Projection"] -->|Huber Loss| Delta["Continuous Delta"]
+    end
+    
+    subgraph "Head 2: Structure"
+    H2["Bilinear Query"] -->|BCE Loss| DAG["Discrete Adjacency"]
+    end
+    
+    style Delta fill:#bfb,stroke:#333,color:#fff
+    style DAG fill:#fbb,stroke:#333,color:#fff
+```
 The Deep Physics Logic (Transformer Output) splits into two tasks:
 *   **Delta Head**:
     *   **Task**: Predict continuous value changes $\Delta = f(Parents)$.
