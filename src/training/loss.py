@@ -17,14 +17,53 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
                    lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0):
     loss_delta = nn.functional.huber_loss(pred_delta, true_delta)
     
-    # Phase 4: Decoupled Learning (No DAG Head)
-    # We ignore pred_adj and true_adj for now
-    loss_dag = torch.tensor(0.0, device=pred_delta.device)
-    loss_h = torch.tensor(0.0, device=pred_delta.device)
+    # Phase 5: Unified Learning (Structure Enabled)
+    # 1. DAG Construction Loss (Binary Cross Entropy on Edges)
+    # pred_adj are raw logits.
+    loss_dag = nn.functional.binary_cross_entropy_with_logits(pred_adj, true_adj)
     
-    total_loss = loss_delta * lambda_delta
+    # 2. Acyclicity Loss (H-Score)
+    # We need Probabilities for H-score
+    adj_prob = torch.sigmoid(pred_adj)
+    # Reduce to [N, N] for H-score? Unbatching?
+    # Actually compute_h_loss usually expects a single matrix or batched trace.
+    # Our compute_h_loss implementation: A_sq = adj * adj.
+    # If adj is (B, N, N), matmul works per batch.
+    # Trace logic needs to handle batch dimension.
     
-    return total_loss, {"delta": loss_delta.item(), "dag": 0.0, "h": 0.0}
+    # Let's check compute_h_loss implementation above. 
+    # It does `torch.trace`. torch.trace only works on 2D tensors!
+    # We need to average h over the batch.
+    
+    loss_h = 0.0
+    if lambda_h > 0:
+        # Loop over batch for safety or vectorize trace?
+        # Einsum 'bii -> b' is trace.
+        # But matrix_exp is expensive.
+        # Use mean matrix? No, H(Mean(A)) != Mean(H(A)).
+        # For efficiency, let's take mean of probabilities and enforce H on that?
+        # "Consensus DAG": The batch likely comes from the SAME graph structure (if seeded identically)
+        # BUT in our generator, every sample might be a different graph?
+        # Wait, SCMGenerator main loop makes ONE graph per epoch step? No.
+        # CausalDataset generates infinite random graphs.
+        # So every sample in batch is a DIFFERENT graph.
+        # We must penalize H for EACH graph.
+        # This is very expensive (Matrix Exp for BxN).
+        # Optimization: Only calculate H on a subset or accumulate?
+        # Let's try iterating for now (Batch=16, 32 is small).
+        
+        h_sum = 0
+        for i in range(len(adj_prob)):
+             h_sum += compute_h_loss(adj_prob[i])
+        loss_h = h_sum / len(adj_prob)
+
+    total_loss = (loss_delta * lambda_delta) + (loss_dag * lambda_dag) + (loss_h * lambda_h)
+    
+    return total_loss, {
+        "delta": loss_delta.item(), 
+        "dag": loss_dag.item(), 
+        "h": loss_h.item() if isinstance(loss_h, torch.Tensor) else loss_h
+    }
 
 def mcm_loss_fn(pred_values, true_values, mask_indices):
     """

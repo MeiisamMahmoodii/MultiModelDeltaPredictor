@@ -249,6 +249,16 @@ class CausalTransformer(nn.Module):
         # 4. Masked Causal Modeling Head (Pre-training)
         self.mcm_head = nn.Linear(d_model, 1)
 
+        # 5. DAG Structural Head (Phase 5: Re-enabled)
+        # We want to predict Adjacency Matrix A_ij from Pairs of Tokens (i, j)
+        # But for O(N^2) efficiency, we can project to Key/Query space and do dot product?
+        # Or simplistic: Predict 'Parent' logits for each node.
+        # Strategy: Each node emits a "Parent Query". All nodes emit "Parent Keys".
+        # This is essentially one attention block trained to find parents.
+        self.dag_query = nn.Linear(d_model, d_model)
+        self.dag_key = nn.Linear(d_model, d_model)
+        self.dag_scale = d_model ** -0.5
+
     def forward(self, base_samples, int_samples, target_row, int_mask, int_node_idx=None, mcm_mask=None):
         """
         Input:
@@ -257,9 +267,9 @@ class CausalTransformer(nn.Module):
         # Pass 1: Initial Guess
         if self.grad_checkpoint and self.training:
             # Inputs to pass 1 don't require grad, so use_reentrant=False is mandatory for checkpoint to work
-            deltas_1, mcm_out = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, use_reentrant=False)
+            deltas_1, mcm_out, logits_1 = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, use_reentrant=False)
         else:
-            deltas_1, mcm_out = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
+            deltas_1, mcm_out, logits_1 = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
         
         if mcm_mask is not None:
              B, N = base_samples.shape
@@ -276,9 +286,9 @@ class CausalTransformer(nn.Module):
              refined_base = base_samples + deltas_1
              
         if self.grad_checkpoint and self.training:
-            deltas_2, _ = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, use_reentrant=False)
+            deltas_2, _, _ = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, use_reentrant=False)
         else:
-            deltas_2, _ = self._forward_pass(refined_base, int_samples, target_row, int_mask, None)
+            deltas_2, _, _ = self._forward_pass(refined_base, int_samples, target_row, int_mask, None)
         
         
         # Pass 3: Final Polish
@@ -288,9 +298,9 @@ class CausalTransformer(nn.Module):
              refined_base_2 = base_samples + deltas_2
              
         if self.grad_checkpoint and self.training:
-             deltas_final, _ = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, use_reentrant=False)
+             deltas_final, _, logits_final = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, use_reentrant=False)
         else:
-             deltas_final, _ = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None)
+             deltas_final, _, logits_final = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None)
         
         
         # Returning Dummy Logits/Adj for API compatibility with main.py metrics
@@ -299,10 +309,14 @@ class CausalTransformer(nn.Module):
         else:
             B, N = base_samples.shape
             
-        dummy_logits = torch.zeros(B, N, N, device=base_samples.device)
         dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
         
-        return deltas_final, dummy_logits, dummy_adj, None
+        # Phase 5: Return REAL logits from final pass
+        # We need to call _forward_pass one last time BUT ask it to compute structure
+        # actually _forward_pass returns deltas, mcm_out, (and now) logits
+        # Let's adjust _forward_pass to return logits too.
+        
+        return deltas_final, logits_final, dummy_adj, None
 
     def _forward_pass(self, base_samples, int_samples, target_row, int_mask, mcm_mask):
         # Prepare inputs for Encoder (Handle masking)
@@ -330,7 +344,24 @@ class CausalTransformer(nn.Module):
         if mcm_mask is not None:
             mcm_out = self.mcm_head(value_tokens).squeeze(-1) # (B, N)
             
-        return deltas, mcm_out
+        mcm_out = None
+        if mcm_mask is not None:
+            mcm_out = self.mcm_head(value_tokens).squeeze(-1) # (B, N)
+            
+        # DAG Prediction (Phase 5)
+        # Query: "Who are my parents?"
+        Q = self.dag_query(value_tokens) # (B, N, D)
+        # Key: "I am a potential parent"
+        K = self.dag_key(value_tokens)   # (B, N, D)
+        
+        # Logits: (B, N, N) -> A_ij means j -> i? Or i -> j?
+        # Standard: Row i = Child, Cols = Parents. A[i, j] = 1 means j -> i.
+        # So "Who are my parents" corresponds to Row i.
+        # Q[i] dot K[j] should be high if j is parent of i.
+        
+        logits = torch.matmul(Q, K.transpose(-2, -1)) * self.dag_scale
+        
+        return deltas, mcm_out, logits
 
     def anneal_temperature(self, epoch, total_epochs):
         # No tau needed for Gumbel (Hard=True)
