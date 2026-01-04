@@ -92,8 +92,8 @@ graph TD
     end
     
     style SCM fill:#f9f,stroke:#333
-    style World1 fill:#bbf,stroke:#333
-    style World2 fill:#bfb,stroke:#333
+    style World1 fill:#bbf,stroke:#000
+    style World2 fill:#bfb,stroke:#000
 ```
 
 ### SCM Generator
@@ -117,9 +117,9 @@ graph TD
     Switch -->|Route Token| E3
     E3 -->|Output| Result["Specialized Pred"]
     
-    style Token fill:#eee,stroke:#333
+    style Token fill:#eee,stroke:#000
     style Gumbel fill:#f9f,stroke:#333
-    style E3 fill:#bfb,stroke:#333
+    style E3 fill:#bfb,stroke:#000
 ```
 *   **Purpose**: Physical laws are distinct (e.g., a "Threshold" function behaves differently from a "Sine Wave"). A single dense network blurs them.
 *   **Mechanism**:
@@ -142,8 +142,8 @@ graph TD
     H2["Bilinear Query"] -->|BCE Loss| DAG["Discrete Adjacency"]
     end
     
-    style Delta fill:#bfb,stroke:#333,color:#fff
-    style DAG fill:#fbb,stroke:#333,color:#fff
+    style Delta fill:#bfb,stroke:#333,color:#000
+    style DAG fill:#fbb,stroke:#333,color:#000
 ```
 The Deep Physics Logic (Transformer Output) splits into two tasks:
 *   **Delta Head**:
