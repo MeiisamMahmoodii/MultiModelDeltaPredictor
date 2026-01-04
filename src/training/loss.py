@@ -20,7 +20,11 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
     # Phase 5: Unified Learning (Structure Enabled)
     # 1. DAG Construction Loss (Binary Cross Entropy on Edges)
     # pred_adj are raw logits.
-    loss_dag = nn.functional.binary_cross_entropy_with_logits(pred_adj, true_adj)
+    loss_dag = nn.functional.binary_cross_entropy_with_logits(
+        pred_adj, 
+        true_adj,
+        pos_weight=torch.tensor(3.0, device=pred_adj.device) # Fixed imbalance correction (3.0 for ~25% density)
+    )
     
     # 2. Acyclicity Loss (H-Score)
     # We need Probabilities for H-score
