@@ -162,12 +162,24 @@ def main():
         
         # Handle state dict for DDP (remove 'module.' prefix if needed or add it)
         # However, DDP wraps model in 'module.', so direct load normally works if saved from DDP.
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            # Force verbose off to avoid warnings from resumed state
-            if hasattr(scheduler, 'verbose'): scheduler.verbose = False
+        
+        # Phase 5 Transition: Checkpoint might be missing DAG Head keys.
+        # We use strict=False to allow loading partial weights (Physics) while initializing DAG Head randomly.
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if is_master and len(missing_keys) > 0:
+            print(f"Warning: Missing keys in checkpoint (Expected for Phase 5 Transition): {missing_keys}")
+        
+        # Optimizer Load: Might fail if params changed.
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                # Force verbose off to avoid warnings from resumed state
+                if hasattr(scheduler, 'verbose'): scheduler.verbose = False
+        except Exception as e:
+            if is_master:
+                print(f"Warning: Could not load optimizer state (New Parameters Added?): {e}")
+                print("Starting with FRESH Optimizer for this Phase.")
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
