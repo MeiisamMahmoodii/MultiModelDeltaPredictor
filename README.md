@@ -48,8 +48,8 @@ graph TD
     Refine -->|"Head 1 (Physics)"| Delta["Delta Prediction (Huber Loss)"]
     Refine -->|"Head 2 (Structure)"| Graph["DAG Adjacency (BCE Loss)"]
 
-    style Delta fill:#bfb,stroke:#333,stroke-width:2px,color:#fff
-    style Graph fill:#fbb,stroke:#333,stroke-width:2px,color:#fff
+    style Delta fill:#bfb,stroke:#333,stroke-width:2px,color:#000
+    style Graph fill:#fbb,stroke:#333,stroke-width:2px,color:#000
 ```
 
 ### Key Components
