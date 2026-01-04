@@ -53,11 +53,29 @@ graph TD
 ```
 
 ### Key Components
-1.  **RoPE (Rotary Embeddings)**: Allows the model to understand "Relative distance" between nodes in the sequence.
-2.  **Hard MoE (Mixture of Experts)**: Use Discrete Gumbel-Softmax to route tokens to specific "Physics Experts" (e.g., one expert specializes in Sine waves, another in Thresholds).
-3.  **Dual Heads**:
-    *   **Delta Head**: Predicts continuous value changes.
-    *   **DAG Head**: Predicts the discrete Causal Graph ($A_{ij}$).
+
+#### 1. RoPE (Rotary Positional Embeddings)
+*   **Purpose**: Standard transformers use absolute positions ($0, 1, 2...$). In a causal graph, node $i$ and node $j$ might be far apart in the list but close in the graph. RoPE encodes "Relative Distance" mathematically.
+*   **Mechanism**: It rotates the Query and Key vectors in the complex plane by an angle proportional to their position.
+*   **Benefit**: This allows the attention mechanism to understand *relative* relationships (e.g., "Input $X$ is the value immediately following Node ID $Y$") regardless of where they appear in the total sequence.
+
+#### 2. Hard MoE (Mixture of Experts) with Gumbel-Softmax
+*   **Purpose**: Physical laws are distinct (e.g., a "Threshold" function behaves differently from a "Sine Wave"). A single dense network blurs them.
+*   **Mechanism**:
+    *   We use 8 Vectorized Experts.
+    *   A **Router** network predicts which expert to use.
+    *   **Gumbel-Softmax (Hard)**: Instead of a weighted average (Soft MoE), we use the "Straight-Through Estimator" to force a discrete choice ($1$ for Expert A, $0$ for others).
+*   **Benefit**: This forces specialization. One expert becomes the "Sine Wave Specialist", another the "Linear Specialist", preventing interference between conflicting physical laws.
+
+#### 3. Dual Heads (Unified Output)
+The Deep Physics Logic (Transformer Output) splits into two tasks:
+*   **Delta Head**:
+    *   **Task**: Predict continuous value changes $\Delta = f(Parents)$.
+    *   **Loss**: Huber Loss (Robust Regression).
+*   **DAG Head**:
+    *   **Task**: Predict the discrete Causal Graph ($A_{ij}$).
+    *   **Mechanism**: A bilinear layer that queries "Who are my parents?" for every node.
+    *   **Loss**: Binary Cross Entropy (BCE) with `pos_weight` to handle sparsity.
 
 ---
 
