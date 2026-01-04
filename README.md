@@ -65,9 +65,9 @@ graph LR
     Rot -->|Dot Product| Score["Relative Score (Depends on m-n)"]
     end
     
-    style Vec fill:#eee,stroke:#333
-    style Rot fill:#bbf,stroke:#333
-    style Score fill:#bfb,stroke:#333
+    style Vec fill:#eee,stroke:#333,color:#000
+    style Rot fill:#bbf,stroke:#333,color:#000
+    style Score fill:#bfb,stroke:#333,color:#000
 ```
 *   **Purpose**: Standard transformers use absolute positions ($0, 1, 2...$). In a causal graph, node $i$ and node $j$ might be far apart in the list but close in the graph. RoPE encodes "Relative Distance" mathematically.
 *   **Mechanism**: It rotates the Query and Key vectors in the complex plane by an angle proportional to their position.
@@ -91,9 +91,10 @@ graph TD
     World2 -->|Tokenize| Input["Model Input"]
     end
     
-    style SCM fill:#f9f,stroke:#333
-    style World1 fill:#bbf,stroke:#000
-    style World2 fill:#bfb,stroke:#000
+    style SCM fill:#f9f,stroke:#333,color:#000
+    style Graph fill:#eee,stroke:#333,color:#000
+    style World1 fill:#bbf,stroke:#000,color:#000
+    style World2 fill:#bfb,stroke:#000,color:#000
 ```
 
 ### SCM Generator
@@ -117,9 +118,10 @@ graph TD
     Switch -->|Route Token| E3
     E3 -->|Output| Result["Specialized Pred"]
     
-    style Token fill:#eee,stroke:#000
-    style Gumbel fill:#f9f,stroke:#333
-    style E3 fill:#bfb,stroke:#000
+    style Token fill:#eee,stroke:#000,color:#000
+    style Router fill:#eee,stroke:#333,color:#000
+    style Gumbel fill:#f9f,stroke:#333,color:#000
+    style E3 fill:#bfb,stroke:#000,color:#000
 ```
 *   **Purpose**: Physical laws are distinct (e.g., a "Threshold" function behaves differently from a "Sine Wave"). A single dense network blurs them.
 *   **Mechanism**:
