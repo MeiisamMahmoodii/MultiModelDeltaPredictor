@@ -4,9 +4,16 @@ from sklearn.metrics import f1_score
 
 # Try to import d_separated, handle versions
 try:
-    from networkx import is_d_separator
+    from networkx import d_separated as is_d_separator
 except ImportError:
-    from networkx.algorithms.d_separation import is_d_separator
+    try:
+        from networkx.algorithms.d_separation import d_separated as is_d_separator
+    except ImportError:
+        # Fallback for older versions or if it's named is_d_separator
+        try:
+             from networkx import is_d_separator
+        except ImportError:
+             from networkx.algorithms.d_separation import is_d_separator
 
 
 def compute_sid(pred_adj_logits, true_adj_matrix, threshold=0.0):
