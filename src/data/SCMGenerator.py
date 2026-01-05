@@ -130,7 +130,7 @@ class SCMGenerator:
             data[node] = np.clip(total, -100, 100)
         return data, noise
 
-    def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True):
+    def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True):
         if num_nodes is None: num_nodes = self.num_nodes
         dag = self.generate_dag(num_nodes, edge_prob)
         dag = self.edge_parameters(dag)
@@ -168,8 +168,13 @@ class SCMGenerator:
         
         for t in targets:
             for val in self.intervention_values:
-                # Intervened Data using SAME Global Noise
-                df_int, _ = self.generate_data(dag, num_samples_per_intervention, intervention={t: val}, noise=global_noise)
+                # Intervened Data using SAME Global Noise (Twin World) OR Random Noise (Ablation)
+                noise_for_int = global_noise
+                if not use_twin_world:
+                    # Generate fresh noise for this intervention
+                    noise_for_int = np.random.normal(scale=self.noise_scale, size=(num_samples_per_intervention, noise_dim))
+                    
+                df_int, _ = self.generate_data(dag, num_samples_per_intervention, intervention={t: val}, noise=noise_for_int)
                 
                 mask = np.zeros((num_samples_per_intervention, len(nodes)))
                 mask[:, t] = 1.0

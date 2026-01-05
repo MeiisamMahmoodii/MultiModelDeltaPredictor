@@ -232,19 +232,30 @@ class CausalTransformer(nn.Module):
     - Recurrent Refinement (3-step)
     - NO DAG HEAD (Decoupled)
     """
-    def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12, grad_checkpoint=False):
+    def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12, grad_checkpoint=False, 
+                 ablation_dense=False, ablation_no_interleaved=False, ablation_no_dag=False, ablation_no_physics=False):
         super().__init__()
         self.num_nodes = num_nodes
         self.grad_checkpoint = grad_checkpoint
         
-        # 1. Interleaved Encoding
-        self.encoder = InterleavedEncoder(num_nodes, d_model)
+        self.ablation_no_interleaved = ablation_no_interleaved
+        self.ablation_no_dag = ablation_no_dag
+        self.ablation_no_physics = ablation_no_physics
+        
+        # 1. Interleaved Encoding (or Additive for Ablation)
+        mode = 'additive' if ablation_no_interleaved else 'interleaved'
+        self.encoder = InterleavedEncoder(num_nodes, d_model, mode=mode)
         
         # 2. RoPE Backbone (Replaces standard TransformerEncoder)
-        self.transformer = RoPETransformer(d_model, nhead, num_layers, max_len=num_nodes*2 + 10)
+        # If additive (no interleaved), seq_len is N (plus margin).
+        # If interleaved, seq_len is 2N.
+        factor = 1 if ablation_no_interleaved else 2
+        self.transformer = RoPETransformer(d_model, nhead, num_layers, max_len=num_nodes*factor + 10)
         
         # 3. Universal MoE Layer (Hard Gumbel)
-        self.moe = MoELayer(d_model, num_experts=8, num_layers_per_expert=4)
+        # Ablation: Dense = 1 Expert (Trivial Routing)
+        num_experts = 1 if ablation_dense else 8
+        self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=4)
         
         # 4. Masked Causal Modeling Head (Pre-training)
         self.mcm_head = nn.Linear(d_model, 1)
@@ -337,8 +348,21 @@ class CausalTransformer(nn.Module):
         x = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
         x = self.transformer(x)
         
-        value_tokens = x[:, 1::2, :]   # (B, N, D)
-        deltas = self.moe(value_tokens)
+        # Extract Value Tokens (embedding of the variable values)
+        if self.ablation_no_interleaved:
+            # Mode 'additive': All tokens are value tokens
+            value_tokens = x
+        else:
+            # Mode 'interleaved': [ID, Value, ID, Value...]
+            value_tokens = x[:, 1::2, :]   # (B, N, D)
+            
+        # Physics Head (MoE)
+        if self.ablation_no_physics:
+             # Return zeros
+             # deltas shape: (B, N)
+             deltas = torch.zeros(value_tokens.shape[0], value_tokens.shape[1], device=value_tokens.device)
+        else:
+             deltas = self.moe(value_tokens)
         
         mcm_out = None
         if mcm_mask is not None:
@@ -349,17 +373,14 @@ class CausalTransformer(nn.Module):
             mcm_out = self.mcm_head(value_tokens).squeeze(-1) # (B, N)
             
         # DAG Prediction (Phase 5)
-        # Query: "Who are my parents?"
-        Q = self.dag_query(value_tokens) # (B, N, D)
-        # Key: "I am a potential parent"
-        K = self.dag_key(value_tokens)   # (B, N, D)
-        
-        # Logits: (B, N, N) -> A_ij means j -> i? Or i -> j?
-        # Standard: Row i = Child, Cols = Parents. A[i, j] = 1 means j -> i.
-        # So "Who are my parents" corresponds to Row i.
-        # Q[i] dot K[j] should be high if j is parent of i.
-        
-        logits = torch.matmul(Q, K.transpose(-2, -1)) * self.dag_scale
+        logits = torch.zeros(value_tokens.shape[0], value_tokens.shape[1], value_tokens.shape[1], device=value_tokens.device)
+        if not self.ablation_no_dag:
+            # Query: "Who are my parents?"
+            Q = self.dag_query(value_tokens) # (B, N, D)
+            # Key: "I am a potential parent"
+            K = self.dag_key(value_tokens)   # (B, N, D)
+            
+            logits = torch.matmul(Q, K.transpose(-2, -1)) * self.dag_scale
         
         return deltas, mcm_out, logits
 

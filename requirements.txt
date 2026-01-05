@@ -5,3 +5,6 @@ networkx
 rich
 scikit-learn
 matplotlib
+seaborn
+causal-learn
+networkx

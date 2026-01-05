@@ -83,7 +83,16 @@ def main():
     parser.add_argument("--checkpoint_path", type=str, default="last_checkpoint.pt", help="Path to checkpoint")
     parser.add_argument("--grad_checkpoint", action="store_true", help="Enable gradient checkpointing (Saves Memory)")
     parser.add_argument("--lambda_dag", type=float, default=0.0, help="Weight for DAG structural loss")
+
     parser.add_argument("--lambda_h", type=float, default=0.0, help="Weight for Acyclicity loss")
+    parser.add_argument("--lambda_sparse", type=float, default=0.0, help="Weight for Sparsity (L1) loss")
+    
+    # Ablation Flags
+    parser.add_argument("--ablation_no_twin_world", action="store_true", help="Disable Twin World Variance Reduction")
+    parser.add_argument("--ablation_dense_moe", action="store_true", help="Use Dense MLP instead of Hard MoE")
+    parser.add_argument("--ablation_no_interleaved", action="store_true", help="Use standard additive encoding")
+    parser.add_argument("--ablation_no_dag", action="store_true", help="Disable DAG Head")
+    parser.add_argument("--ablation_no_physics", action="store_true", help="Disable Physics Head")
     
     args = parser.parse_args()
     
@@ -114,7 +123,11 @@ def main():
         num_nodes=args.max_vars + 5, 
         d_model=512,
         num_layers=args.num_layers,
-        grad_checkpoint=args.grad_checkpoint
+        grad_checkpoint=args.grad_checkpoint,
+        ablation_dense=args.ablation_dense_moe,
+        ablation_no_interleaved=args.ablation_no_interleaved,
+        ablation_no_dag=args.ablation_no_dag,
+        ablation_no_physics=args.ablation_no_physics
     )
     model.to(device)
     
@@ -222,7 +235,8 @@ def main():
             gen, 
             num_nodes_range=(params['max_vars']-1, params['max_vars']),
             samples_per_graph=64,
-            reuse_factor=args.reuse_factor
+            reuse_factor=args.reuse_factor,
+            use_twin_world=not args.ablation_no_twin_world
         )
         
         # No DistributedSampler for IterableDataset
@@ -281,7 +295,8 @@ def main():
                 logits, 
                 batch['adj'].to(device),
                 lambda_dag=args.lambda_dag,
-                lambda_h=args.lambda_h
+                lambda_h=args.lambda_h,
+                lambda_l1=args.lambda_sparse
             ) 
             
             optimizer.zero_grad()

@@ -4,7 +4,7 @@ import networkx as nx
 from torch.utils.data import IterableDataset
 
 class CausalDataset(IterableDataset):
-    def __init__(self, generator, num_nodes_range=(5, 10), samples_per_graph=100, edge_prob=0.3, intervention_prob=0.5, infinite=True, validation_graphs=32, reuse_factor=1):
+    def __init__(self, generator, num_nodes_range=(5, 10), samples_per_graph=100, edge_prob=0.3, intervention_prob=0.5, infinite=True, validation_graphs=32, reuse_factor=1, use_twin_world=True):
         self.generator = generator
         self.num_nodes_range = num_nodes_range
         self.samples_per_graph = samples_per_graph
@@ -13,6 +13,7 @@ class CausalDataset(IterableDataset):
         self.infinite = infinite
         self.validation_graphs = validation_graphs
         self.reuse_factor = reuse_factor
+        self.use_twin_world = use_twin_world
     
     def __iter__(self):
         graphs_generated = 0
@@ -27,7 +28,8 @@ class CausalDataset(IterableDataset):
                 num_samples_base=self.samples_per_graph,
                 num_samples_per_intervention=self.samples_per_graph,
                 intervention_prob=self.intervention_prob,
-                as_torch=True
+                as_torch=True,
+                use_twin_world=self.use_twin_world,
             )
             
             graphs_generated += 1

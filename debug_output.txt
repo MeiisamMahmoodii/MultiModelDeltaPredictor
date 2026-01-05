@@ -1,0 +1,41 @@
+/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/causallearn/search/ConstraintBased/PC.py:36: UserWarning: The number of features is much larger than the sample size!
+  warnings.warn("The number of features is much larger than the sample size!")
+/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py:3015: RuntimeWarning: Degrees of freedom <= 0 for slice
+  c = cov(x, y, rowvar, dtype=dtype)
+/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py:2888: RuntimeWarning: divide by zero encountered in divide
+  c *= np.true_divide(1, fact)
+/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py:2888: RuntimeWarning: invalid value encountered in multiply
+  c *= np.true_divide(1, fact)
+--- Comparing Models (N=20) ---
+  0%|          | 0/20 [00:00<?, ?it/s]  0%|          | 0/20 [00:00<?, ?it/s]Depth=0, working on node 0:   5%|▌         | 1/20 [00:00<00:00, 12633.45it/s]Depth=0, working on node 0:   5%|▌         | 1/20 [00:00<00:00, 698.24it/s]  
+PC Failed: math domain error
+DEBUG: base=torch.Size([1, 20]), int=torch.Size([1, 20]), target=torch.Size([1, 20]), mask=torch.Size([32, 20])
+ENCODER DEBUG: B=1, N=20, target=torch.Size([1, 20])
+Traceback (most recent call last):
+  File "/Users/a1962523/Code/ISD-CP-Learning/experiments/compare_models.py", line 224, in <module>
+    evaluate_baselines("final_chekpoint/checkpoint_epoch_253.pt")
+  File "/Users/a1962523/Code/ISD-CP-Learning/experiments/compare_models.py", line 206, in evaluate_baselines
+    _, logits, _, _ = model(
+                      ^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/src/models/CausalTransformer.py", line 283, in forward
+    deltas_1, mcm_out, logits_1 = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/src/models/CausalTransformer.py", line 348, in _forward_pass
+    x = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/a1962523/Code/ISD-CP-Learning/src/data/encoder.py", line 114, in forward
+    stacked = torch.stack([f_emb, v_emb], dim=2)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: stack expects each tensor to be equal size, but got [1, 20, 512] at entry 0 and [32, 20, 512] at entry 1

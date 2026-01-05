@@ -59,11 +59,14 @@ class InterleavedEncoder(nn.Module):
     """
     Transforms Causal Data (Base, Mask, Value) into Interleaved Tokens.
     Format: [Feature_ID_0, Value_0, Feature_ID_1, Value_1, ...]
+    
+    Ablation Support: atomic_mode='additive' (Standard Transformer) vs 'interleaved' (Novel).
     """
-    def __init__(self, num_vars, d_model):
+    def __init__(self, num_vars, d_model, mode='interleaved'):
         super().__init__()
         self.num_vars = num_vars
         self.d_model = d_model
+        self.mode = mode
         
         # Embeddings
         # 1. Feature ID Embedding: "Who am I?"
@@ -90,7 +93,7 @@ class InterleavedEncoder(nn.Module):
         
         # 1. Feature Tokens
         # Create IDs: [0, 1, ..., N-1] repeated B times
-        ids = torch.arange(N, device=device).unsqueeze(0).expand(B, -1) # (B, N)
+        ids = torch.arange(N, device=device).unsqueeze(0).repeat(B, 1) # (B, N)
         f_emb = self.var_id_emb(ids) # (B, N, D)
         
         # 2. Value Tokens
@@ -104,9 +107,13 @@ class InterleavedEncoder(nn.Module):
         t_emb = self.type_emb(t_ids) # (B, N, D)
         v_emb = v_emb + t_emb
         
-        # 3. Interleave
-        # Stack: (B, N, 2, D) -> Flatten: (B, 2N, D)
-        stacked = torch.stack([f_emb, v_emb], dim=2)
-        tokens = stacked.flatten(1, 2)
-        
+        # 3. Combine
+        if self.mode == 'interleaved':
+            # Interleave: Stack (B, N, 2, D) -> Flatten (B, 2N, D)
+            stacked = torch.stack([f_emb, v_emb], dim=2)
+            tokens = stacked.flatten(1, 2)
+        else:
+            # Additive (Standard): Sum all embeddings -> (B, N, D)
+            tokens = f_emb + v_emb # v_emb already includes type info from above
+            
         return tokens

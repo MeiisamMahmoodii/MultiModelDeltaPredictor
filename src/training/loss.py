@@ -61,7 +61,11 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
              h_sum += compute_h_loss(adj_prob[i])
         loss_h = h_sum / len(adj_prob)
 
-    total_loss = (loss_delta * lambda_delta) + (loss_dag * lambda_dag) + (loss_h * lambda_h)
+    loss_l1 = 0.0
+    if lambda_l1 > 0:
+        loss_l1 = torch.mean(torch.abs(adj_prob))
+        
+    total_loss = (loss_delta * lambda_delta) + (loss_dag * lambda_dag) + (loss_h * lambda_h) + (loss_l1 * lambda_l1)
     
     return total_loss, {
         "delta": loss_delta.item(), 
