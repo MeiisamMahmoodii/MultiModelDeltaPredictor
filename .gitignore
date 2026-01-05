@@ -21,3 +21,7 @@ venv/
 # Project Specific
 checkpoints/
 logs/
+*.pt
+checkpoints/
+final_chekpoint/
+training_log.csv
