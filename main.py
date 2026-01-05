@@ -197,13 +197,13 @@ def main():
             # We generate Val Set on all ranks to avoid broadcasting complexity for now 
             # (RNG seeded by local_rank, so each rank validates on its own slice)
             # Use current density (or fixed edge_prob) 
-            # Force int_prob=0.1 for Validation to prevent dataset explosion
+            # Match Training Intervention Probability
             curr_edge_prob = args.edge_prob if args.edge_prob is not None else params['density_max']
             val_loader = get_validation_set(
                 params['max_vars'], 
                 device, 
                 edge_prob=curr_edge_prob,
-                intervention_prob=0.1
+                intervention_prob=args.intervention_prob # FIXED: Match training difficulty
             )
             current_val_vars = params['max_vars']
             
