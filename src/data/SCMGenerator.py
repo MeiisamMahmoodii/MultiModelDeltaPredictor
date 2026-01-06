@@ -4,6 +4,7 @@ import networkx as nx
 import torch
 
 from typing import List, Optional
+from scipy.special import expit
 
 class SCMGenerator:
     def __init__(
@@ -110,7 +111,7 @@ class SCMGenerator:
                 elif func == 'tan': term = np.tanh(pval)
                 elif func == 'quadratic': term = np.clip(pval, -5, 5)**2
                 elif func == 'cubic': term = np.clip(pval, -3, 3)**3
-                elif func == 'sigmoid': term = 1 / (1 + np.exp(-pval))
+                elif func == 'sigmoid': term = expit(pval)
                 elif func == 'step': term = (pval > 0).astype(float)
                 elif func == 'abs': term = np.abs(pval)
                 elif func == 'poly': 
