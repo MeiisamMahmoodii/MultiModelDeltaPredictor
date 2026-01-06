@@ -87,33 +87,55 @@ def evaluate_loader(model, loader, device, description="Validating"):
     """
     model.eval()
     total_metrics = {
-        'mae': 0.0, 'f1': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'n_batches': 0
+        'mae': 0.0, 'f1': 0.0, 'shd': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'n_batches': 0
     }
     
     with torch.no_grad():
-        for batch in loader:
-            base = batch['base_samples'].to(device)
-            int_s = batch['int_samples'].to(device)
-            target = batch['target_row'].to(device)
-            mask = batch['int_mask'].to(device)
-            idx = batch['int_node_idx'].to(device)
-            
-            # Forward
-            deltas, logits, adj, _, _ = model(base, int_s, target, mask, idx)
-            
-            # Metrics
-            total_metrics['mae'] += compute_mae(deltas, batch['delta'].to(device))
-            total_metrics['f1'] += compute_f1(logits, batch['adj'].to(device))
-            tpr, fdr = compute_tpr_fdr(logits, batch['adj'].to(device))
-            total_metrics['tpr'] += tpr
-            total_metrics['fdr'] += fdr
-            total_metrics['n_batches'] += 1
+        # Setup Progress Bar
+        progress_ctx = None
+        if RICH_AVAILABLE:
+            from rich.progress import SpinnerColumn
+            progress_ctx = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
+                transient=True
+            )
+            progress_ctx.start()
+            task_id = progress_ctx.add_task(description, total=None) # Unknown length for iterable dataset
+        
+        try:
+            for i, batch in enumerate(loader):
+                if progress_ctx: progress_ctx.update(task_id, advance=1, description=f"{description} (Batch {i+1})")
+                
+                base = batch['base_samples'].to(device)
+                int_s = batch['int_samples'].to(device)
+                target = batch['target_row'].to(device)
+                mask = batch['int_mask'].to(device)
+                idx = batch['int_node_idx'].to(device)
+                
+                # Forward
+                deltas, logits, adj, _, _ = model(base, int_s, target, mask, idx)
+                
+                # Metrics
+                total_metrics['mae'] += compute_mae(deltas, batch['delta'].to(device))
+                total_metrics['f1'] += compute_f1(logits, batch['adj'].to(device))
+                total_metrics['shd'] += compute_shd(logits, batch['adj'].to(device))
+                tpr, fdr = compute_tpr_fdr(logits, batch['adj'].to(device))
+                total_metrics['tpr'] += tpr
+                total_metrics['fdr'] += fdr
+                total_metrics['n_batches'] += 1
+        finally:
+            if progress_ctx: progress_ctx.stop()
             
     # Average
     n = max(1, total_metrics['n_batches'])
     return {
         'mae': total_metrics['mae'] / n,
         'f1': total_metrics['f1'] / n,
+        'shd': total_metrics['shd'] / n,
         'tpr': total_metrics['tpr'] / n,
         'fdr': total_metrics['fdr'] / n
     }
@@ -460,7 +482,7 @@ def main():
         val_f1 = val_metrics['f1']
         
         if is_master:
-            print(f"Val Level {curriculum.current_level} | MAE: {val_mae:.3f} | F1: {val_f1:.3f} | TPR: {val_metrics['tpr']:.2f} | FDR: {val_metrics['fdr']:.2f}")
+            print(f"Val Level {curriculum.current_level} | MAE: {val_mae:.3f} | SHD: {val_metrics['shd']:.1f} | F1: {val_f1:.3f} | TPR: {val_metrics['tpr']:.2f} | FDR: {val_metrics['fdr']:.2f}")
             
             # 2. Cross-Difficulty Benchmarks (Master Only)
             # "Novel Solution: Cross-Difficulty Validation"
@@ -478,7 +500,7 @@ def main():
                     intervention_scale=b_params['intervention_range']
                 )
                 b_metrics = evaluate_loader(model, b_loader, device, description=level_name)
-                print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | F1: {b_metrics['f1']:.3f}")
+                print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
             print("-----------------------------------")
 
         val_tpr = val_metrics['tpr']
@@ -512,7 +534,7 @@ def main():
                 
                 table.add_row("Total Loss", f"{avg_loss:.4f}", "-")
                 table.add_row("MAE (L1)", f"{total_metrics['mae']/(i+1):.4f}", f"{val_mae:.4f}")
-                table.add_row("SHD", f"{avg_shd:.2f}", "-")
+                table.add_row("SHD", f"{avg_shd:.2f}", f"{val_metrics['shd']:.2f}")
                 table.add_row("Expert Entropy", f"{moe_metrics['entropy']:.4f}", "-")
                 table.add_row("Expert Gini", f"{moe_metrics['gini']:.4f}", "-")
                 table.add_row("LR", f"{optimizer.param_groups[0]['lr']:.2e}", "")
@@ -533,7 +555,7 @@ def main():
                 header = ["Epoch", "Level", "LR", 
                           "Train_Loss", "Train_Delta", "Train_DAG", "Train_H", 
                           "Train_MAE", "Train_SHD", "Train_F1", "Train_TPR", "Train_FDR", 
-                          "Val_MAE", "Val_F1", "Val_TPR", "Val_FDR"]
+                          "Val_MAE", "Val_SHD", "Val_F1", "Val_TPR", "Val_FDR"]
                 if not file_exists:
                     writer.writerow(header)
                 
@@ -551,7 +573,9 @@ def main():
                     f"{total_metrics['f1']/train_iters:.4f}",
                     f"{total_metrics['tpr']/train_iters:.4f}",
                     f"{total_metrics['fdr']/train_iters:.4f}",
+                    f"{total_metrics['fdr']/train_iters:.4f}",
                     f"{val_mae:.4f}",
+                    f"{val_metrics['shd']:.2f}",
                     f"{val_f1:.4f}",
                     f"{val_tpr:.4f}",
                     f"{val_fdr:.4f}"
