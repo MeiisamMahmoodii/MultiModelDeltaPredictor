@@ -221,12 +221,29 @@ def main():
         map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
         checkpoint = torch.load(args.checkpoint_path, map_location=map_location, weights_only=False)
         
-        # Handle state dict for DDP (remove 'module.' prefix if needed or add it)
-        # However, DDP wraps model in 'module.', so direct load normally works if saved from DDP.
+        # Handle state dict for DDP (Fixing key mismatch)
+        state_dict = checkpoint['model_state_dict']
         
+        # Check if model is wrapped in DDP (has 'module.')
+        is_ddp_model = hasattr(model, 'module')
+        
+        # Check if checkpoint keys have 'module.'
+        ckpt_has_module = list(state_dict.keys())[0].startswith('module.')
+        
+        if is_ddp_model and not ckpt_has_module:
+            # Add 'module.' prefix
+            if is_master: print("Adapting checkpoint (Single-GPU) -> Model (DDP)...")
+            new_state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+            state_dict = new_state_dict
+        elif not is_ddp_model and ckpt_has_module:
+            # Strip 'module.' prefix
+            if is_master: print("Adapting checkpoint (DDP) -> Model (Single-GPU)...")
+            new_state_dict = {k[7:]: v for k, v in state_dict.items()}
+            state_dict = new_state_dict
+            
         # Phase 5 Transition: Checkpoint might be missing DAG Head keys.
         # We use strict=False to allow loading partial weights (Physics) while initializing DAG Head randomly.
-        missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
         if is_master and len(missing_keys) > 0:
             print(f"Warning: Missing keys in checkpoint (Expected for Phase 5 Transition): {missing_keys}")
         
