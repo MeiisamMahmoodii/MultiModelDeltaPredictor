@@ -37,13 +37,6 @@ class CurriculumManager:
             "density_max": density_max,
             "intervention_range": int_range
         }
-        
-        return {
-            "max_vars": n_vars,
-            "density_min": density_min,
-            "density_max": density_max,
-            "intervention_range": int_range
-        }
 
     def get_benchmark_params(self):
         """
@@ -88,9 +81,10 @@ class CurriculumManager:
         params = self.get_current_params()
         n_vars = params['max_vars']
         
-        if n_vars <= 25: thresh = 15.0
-        elif n_vars <= 35: thresh = 25.0
-        else: thresh = 40.0
+        # Tightened Thresholds for Phase 3
+        if n_vars <= 25: thresh = 8.0   # Was 15
+        elif n_vars <= 35: thresh = 18.0 # Was 25
+        else: thresh = 30.0             # Was 40
         
         if val_mae < thresh:
             self.stability_counter += 1
