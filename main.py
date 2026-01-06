@@ -451,6 +451,7 @@ def main():
             
         # --- Validation Loop (Fixed Set & Benchmarks) ---
         # 1. Evaluate Current Level (All Ranks participate to sync Curriculum)
+        if is_master: print(f"Validating Current Level {curriculum.current_level}...", flush=True)
         val_metrics = evaluate_loader(model, val_loader, device)
         val_mae = val_metrics['mae']
         val_f1 = val_metrics['f1']
@@ -463,6 +464,7 @@ def main():
             benchmarks = curriculum.get_benchmark_params()
             print("--- Cross-Difficulty Benchmarks ---")
             for level_name, b_params in benchmarks.items():
+                if is_master: print(f"  > Benchmarking {level_name.upper()} (Vars: {b_params['max_vars']})...", flush=True)
                 # Generate ephemeral loader for benchmark
                 # Use max density for robust testing
                 b_loader = get_validation_set(
