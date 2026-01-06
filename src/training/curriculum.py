@@ -38,6 +38,46 @@ class CurriculumManager:
             "intervention_range": int_range
         }
         
+        return {
+            "max_vars": n_vars,
+            "density_min": density_min,
+            "density_max": density_max,
+            "intervention_range": int_range
+        }
+
+    def get_benchmark_params(self):
+        """
+        Returns a dictionary of fixed difficulty configs for cross-validation.
+        """
+        benchmarks = {}
+        
+        # Easy: Minimum vars, low density
+        benchmarks['easy'] = {
+            "max_vars": self.min_vars,
+            "density_min": 0.15,
+            "density_max": 0.20,
+            "intervention_range": 2.0
+        }
+        
+        # Medium: Mid-point vars
+        mid_vars = int((self.min_vars + self.max_vars) / 2)
+        benchmarks['medium'] = {
+            "max_vars": mid_vars,
+            "density_min": 0.20,
+            "density_max": 0.30,
+            "intervention_range": 5.0
+        }
+        
+        # Hard: Max vars, high density
+        benchmarks['hard'] = {
+            "max_vars": self.max_vars,
+            "density_min": 0.30,
+            "density_max": 0.40,
+            "intervention_range": 10.0
+        }
+        
+        return benchmarks
+
     def update(self, val_mae, val_f1):
         """
         Check if we should level up.

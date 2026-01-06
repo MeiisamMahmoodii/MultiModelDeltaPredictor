@@ -51,8 +51,8 @@ class SCMGenerator:
 
     def edge_parameters(self, dag):
         for u, v in dag.edges():
-            eq = np.random.randint(1, 14)
-            # Assign type based on eq (Simplified logic for brevity, expands to full map if needed)
+            eq = np.random.randint(1, 17) # Increased range
+            # Assign type
             if eq == 1: dag[u][v]['type'] = "linear"
             elif eq == 2: dag[u][v]['type'] = "negative linear"
             elif eq == 3: dag[u][v]['type'] = "sin"
@@ -66,6 +66,9 @@ class SCMGenerator:
             elif eq == 11: dag[u][v]['type'] = "sigmoid"
             elif eq == 12: dag[u][v]['type'] = "step"
             elif eq == 13: dag[u][v]['type'] = "abs"
+            elif eq == 14: dag[u][v]['type'] = "poly"
+            elif eq == 15: dag[u][v]['type'] = "sawtooth"
+            elif eq == 16: dag[u][v]['type'] = "rational"
         return dag
 
     def generate_data(self, dag, num_samples, noise_scale=None, intervention=None, noise=None):
@@ -91,9 +94,10 @@ class SCMGenerator:
             parents = list(dag.predecessors(node))
             if not parents: continue
             
-            total = data[node].values.copy() # Start with noise
+            # Start with noise (Additive)
+            # Future: noise_term = data[node].values * heteroscedastic_factor
+            noise_term = data[node].values.copy() 
             
-            # Physics Engine 2.0: Interactions & Non-Linearities
             terms = []
             for p in parents:
                 func = dag[p][node].get('type', 'linear')
@@ -109,6 +113,15 @@ class SCMGenerator:
                 elif func == 'sigmoid': term = 1 / (1 + np.exp(-pval))
                 elif func == 'step': term = (pval > 0).astype(float)
                 elif func == 'abs': term = np.abs(pval)
+                elif func == 'poly': 
+                    # 0.5*x^2 + 0.5*x (Simple polynomial mix)
+                    term = 0.5 * (pval**2) + 0.5 * pval
+                elif func == 'sawtooth': 
+                    # Sawtooth wave: x - floor(x) centered
+                    term = 2.0 * (pval - np.floor(pval)) - 1.0
+                elif func == 'rational': 
+                    # x / (1 + |x|) (Softsign-ish but rational)
+                    term = 2.0 * pval / (1.0 + np.abs(pval))
                 else: term = pval # Fallback
                 terms.append(term)
             
@@ -122,15 +135,15 @@ class SCMGenerator:
                 # Represents "Modulation" (e.g. A * B + C)
                 interact = terms[0] * terms[1]
                 remaining = sum(terms[2:]) if len(terms) > 2 else 0
-                total += (interact + remaining)
+                total = noise_term + (interact + remaining)
             else:
                 # Standard Additive Model
-                total += sum(terms)
+                total = noise_term + sum(terms)
                 
             data[node] = np.clip(total, -100, 100)
         return data, noise
 
-    def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True):
+    def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True, intervention_scale=1.0):
         if num_nodes is None: num_nodes = self.num_nodes
         dag = self.generate_dag(num_nodes, edge_prob)
         dag = self.edge_parameters(dag)
@@ -151,12 +164,14 @@ class SCMGenerator:
         
         # Let's generate a fixed set of noise vectors to be used across all scenarios
         # shape: (num_samples, num_vars)
-        global_noise = np.random.normal(scale=self.noise_scale, size=(num_samples_per_intervention, noise_dim))
+        # Fix: Ensure noise is large enough for both base and intervention batches
+        max_samples = max(num_samples_base, num_samples_per_intervention)
+        global_noise = np.random.normal(scale=self.noise_scale, size=(max_samples, noise_dim))
         
         # Base Data (Observational) using Global Noise
         # Note: If num_samples_base != num_samples_per_int, we have a mismatch.
-        # For simplicity in this unified version, we force them to match or slice.
-        df_base, _ = self.generate_data(dag, num_samples_per_intervention, noise=global_noise)
+        # Now we strictly slice the noise to match the requested base samples.
+        df_base, _ = self.generate_data(dag, num_samples_base, noise=global_noise[:num_samples_base])
         
         # Interventions
         prob = intervention_prob if intervention_prob else self.intervention_prob
@@ -166,10 +181,23 @@ class SCMGenerator:
         all_dfs = [df_base]
         all_masks = [np.zeros((num_samples_per_intervention, len(nodes)))]
         
+        # Standard Deviation for Adaptive Scaling
+        base_stds = df_base.std()
+        
         for t in targets:
-            for val in self.intervention_values:
+            # Adaptive Intervention: Based on Sigma of the observational distribution
+            # This ensures interventions are relative to the variable's natural scale.
+            sigma = base_stds[t]
+            if sigma < 1e-4: sigma = 1.0 # Safety fallback for constant/zero-var nodes
+            
+            # Intervene at ±1σ and ±2σ, scaled by the curriculum difficulty (intervention_scale)
+            # If intervention_scale=1.0, we test "Standard" shifts (1-2 sigmas).
+            # If intervention_scale=50.0, we test "Extreme" shifts (50-100 sigmas).
+            coeffs = [-2.0, -1.0, 1.0, 2.0] 
+            loop_values = [c * sigma * intervention_scale for c in coeffs]
+            for val in loop_values:
                 # Intervened Data using SAME Global Noise (Twin World) OR Random Noise (Ablation)
-                noise_for_int = global_noise
+                noise_for_int = global_noise[:num_samples_per_intervention]
                 if not use_twin_world:
                     # Generate fresh noise for this intervention
                     noise_for_int = np.random.normal(scale=self.noise_scale, size=(num_samples_per_intervention, noise_dim))

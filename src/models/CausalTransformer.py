@@ -106,9 +106,14 @@ class MoELayer(nn.Module):
         # 2. Router
         self.router = nn.Linear(d_model, num_experts)
         
+        # 3. Usage Monitoring (Persistent Buffers)
+        self.register_buffer('expert_counts', torch.zeros(num_experts))
+        self.register_buffer('total_tokens', torch.tensor(0.0))
+        
     def forward(self, x):
         """
         x: (Batch, Num_Active, d_model)
+        Returns: output, aux_loss
         """
         batch_size, num_active, d_model = x.shape
         
@@ -118,21 +123,80 @@ class MoELayer(nn.Module):
         # 1. Router (Hard Gumbel Switch)
         logits = self.router(x_flat) # (Total, Experts)
         # Use Gumbel Softmax (Hard=True) for crisp expert selection
-        # During training, this uses straight-through estimator
         weights = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1) # (Total, Experts)
+        
+        # Aux Loss: Load Balancing
+        probs = F.softmax(logits, dim=-1) # (Total, Experts)
+        # Importance (Batch-wise MEAN of probs)
+        importance = probs.mean(dim=0) # (Experts,)
+        # Target: Importance should be uniform (1 / N)
+        target = 1.0 / self.num_experts
+        aux_loss = torch.mean((importance - target)**2) # MSE from Uniform Distribution
+        
+        # Usage Tracking
+        if self.training:
+            with torch.no_grad():
+                usage = weights.sum(dim=0).detach()
+                self.expert_counts += usage
+                self.total_tokens += weights.size(0)
         
         # 2. Vectorized Execution
         # We broadcast x to all experts: (Total, Experts, d_model)
         x_expanded = x_flat.unsqueeze(1).expand(-1, self.num_experts, -1)
+        expert_outputs = self.experts(x_expanded) 
+        output = (expert_outputs * weights).sum(dim=1) 
         
-        # Run all experts in parallel
-        expert_outputs = self.experts(x_expanded) # (Total, Experts)
+        return output.view(batch_size, num_active), aux_loss
+
+    def get_expert_metrics(self):
+        """
+        Computes entropy and gini coefficient of expert usage.
+        Returns dict.
+        """
+        if self.total_tokens == 0:
+            return {"entropy": 0.0, "gini": 0.0}
+            
+        probs = self.expert_counts / self.total_tokens
         
-        # 3. Weighted Sum (In Hard mode, this selects exactly one expert per token)
-        output = (expert_outputs * weights).sum(dim=1) # (Total, )
+        # Entropy: -sum(p * log(p))
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10))
         
-        # Reshape back to batch: (Batch, Num_Active)
-        return output.view(batch_size, num_active)
+        sorted_probs, _ = torch.sort(probs)
+        n = self.num_experts
+        index = torch.arange(1, n + 1, device=probs.device, dtype=probs.dtype)
+        gini = (2.0 * torch.sum(index * sorted_probs) / (n * torch.sum(sorted_probs) + 1e-10)) - (n + 1.0) / n
+        
+        return {
+            "entropy": entropy.item(), 
+            "gini": gini.item(),
+            "counts": self.expert_counts.cpu().numpy().tolist()
+        }
+
+class LearnedCausalMask(nn.Module):
+    """
+    Learn which attention connections respect causality using predicted adjacency.
+    """
+    def __init__(self, num_nodes):
+        super().__init__()
+        # Learn scaling parameter for the mask (how strong should the causal bias be?)
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.bias = nn.Parameter(torch.tensor(0.0))
+        
+    def forward(self, adj_logits):
+        """
+        adj_logits: (B, N, N) where A[i, j] high means i -> j
+        Attention: Target attends to Source.
+        If i -> j, then j depends on i. So j should attend to i.
+        Attn[Target=j, Source=i] should be high.
+        So we need Transpose(adj_logits).
+        """
+        # (B, N, N) -> (B, N, N)
+        # Transpose so that Attn[j, i] corresponds to Edge i->j
+        causal_bias = adj_logits.transpose(1, 2) 
+        
+        # Scale and Bias
+        # We return logits to be added to attention scores
+        return (causal_bias * self.scale) + self.bias
 
 class RoPEAttentionLayer(nn.Module):
     """
@@ -171,7 +235,7 @@ class RoPEAttentionLayer(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, rotary_emb=None):
+    def forward(self, x, rotary_emb=None, attn_mask=None):
         # x: (Batch, Seq, D)
         B, S, D = x.shape
         
@@ -186,14 +250,14 @@ class RoPEAttentionLayer(nn.Module):
         
         # Apply RoPE
         if rotary_emb is not None:
-            cos, sin = rotary_emb(v, seq_len=S) # Get cos/sin for this sequence length
+            cos, sin = rotary_emb(q, seq_len=S) # Get cos/sin for this sequence length
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
             
         # Attention
         # scaled_dot_product_attention handles masking/dropout efficiently
-        # We don't have causal mask logic passed here yet, generally is_causal=False for "All-to-All"
-        # unless we were masking for DAG (Scenario 2). For now, All-to-All.
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.1)
+        # attn_mask: (B, S, S) or broadcastable
+        # Ensure mask is broadcasted to heads if needed
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.1)
         
         out = out.transpose(1, 2).contiguous().view(B, S, D)
         out = self.w_o(out)
@@ -218,9 +282,9 @@ class RoPETransformer(nn.Module):
         ])
         self.rope = RotaryEmbedding(d_model // nhead, max_position_embeddings=max_len)
         
-    def forward(self, x):
+    def forward(self, x, attn_mask=None):
         for layer in self.layers:
-            x = layer(x, self.rope)
+            x = layer(x, self.rope, attn_mask=attn_mask)
         return x
 
 class CausalTransformer(nn.Module):
@@ -255,10 +319,17 @@ class CausalTransformer(nn.Module):
         # 3. Universal MoE Layer (Hard Gumbel)
         # Ablation: Dense = 1 Expert (Trivial Routing)
         num_experts = 1 if ablation_dense else 8
+        # 3. Universal MoE Layer (Hard Gumbel)
+        # Ablation: Dense = 1 Expert (Trivial Routing)
+        num_experts = 1 if ablation_dense else 8
         self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=4)
         
-        # 4. Masked Causal Modeling Head (Pre-training)
-        self.mcm_head = nn.Linear(d_model, 1)
+        # 4. Learned Causal Mask (Phase 3 Hotfix: Topology-Aware Attention)
+        # "Novel Solution: Learned Causal Masking"
+        # We learn to bias attention based on predicted adjacency.
+        self.causal_mask_net = LearnedCausalMask(num_nodes)
+        
+
 
         # 5. DAG Structural Head (Phase 5: Re-enabled)
         # We want to predict Adjacency Matrix A_ij from Pairs of Tokens (i, j)
@@ -275,21 +346,45 @@ class CausalTransformer(nn.Module):
         Input:
             mcm_mask: (B, N) or None. If present, 1.0 means this token is masked.
         """
+        # Gradient Checkpointing Fix:
+        # use_reentrant=False requires at least one input to have requires_grad=True.
+        # Since our inputs are data (no grad), we inject a dummy tensor.
+        dummy_tensor = torch.tensor(0.0, device=base_samples.device, requires_grad=True)
+
         # Pass 1: Initial Guess
         if self.grad_checkpoint and self.training:
             # Inputs to pass 1 don't require grad, so use_reentrant=False is mandatory for checkpoint to work
-            deltas_1, mcm_out, logits_1 = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, use_reentrant=False)
+            deltas_1, mcm_out, logits_1, aux_1 = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, None, dummy_tensor, use_reentrant=False)
         else:
-            deltas_1, mcm_out, logits_1 = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask)
+            deltas_1, mcm_out, logits_1, aux_1 = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask, None, dummy_tensor)
         
         if mcm_mask is not None:
              B, N = base_samples.shape
              dummy_logits = torch.zeros(B, N, N, device=base_samples.device)
              dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
-             return deltas_1, dummy_logits, dummy_adj, mcm_out
+             # Return 0.0 aux loss for MCM
+             return deltas_1, dummy_logits, dummy_adj, mcm_out, 0.0
         
+        # --- Causal Masking Logic ---
+        # 1. Compute Mask from Pass 1 Logits
+        # logits_1: (B, N, N) -> mask: (B, N, N) bias
+        mask = self.causal_mask_net(logits_1)
         
-        # Pass 2: Refinement (Recurrent)
+        # 2. Expand Mask for Interleaved Tokens (if needed)
+        # Tokens: (B, S, D). Mask: (B, S, S).
+        # if interleaved: S = 2N. Mask is (B, N, N).
+        # We need to map Node i -> Node j dependencies to Token blocks.
+        if not self.ablation_no_interleaved:
+            # Expand (B, N, N) -> (B, 2N, 2N)
+            # Each element (i, j) becomes a 2x2 block
+            mask = mask.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2)
+            
+        # 3. Create Head Mask? 
+        # nn.MultiheadAttention expects (B*nhead, S, S) or (B, S, S).
+        # We have (B, S, S). To broadcast to (B, H, S, S), we need (B, 1, S, S).
+        attn_mask = mask.unsqueeze(1) # Float bias added to scores
+        
+        # Pass 2: Refinement (Recurrent) with Causal Mask
         # Broadcast deltas (B, N) to (B, Context, N) if base_samples has context dim
         if len(base_samples.shape) == 3:
              refined_base = base_samples + deltas_1.unsqueeze(1)
@@ -297,21 +392,28 @@ class CausalTransformer(nn.Module):
              refined_base = base_samples + deltas_1
              
         if self.grad_checkpoint and self.training:
-            deltas_2, _, _ = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, use_reentrant=False)
+            # Capture logits_2 for Iterative Structure Refinement
+            deltas_2, _, logits_2, aux_2 = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, attn_mask, dummy_tensor, use_reentrant=False)
         else:
-            deltas_2, _, _ = self._forward_pass(refined_base, int_samples, target_row, int_mask, None)
+            deltas_2, _, logits_2, aux_2 = self._forward_pass(refined_base, int_samples, target_row, int_mask, None, attn_mask, dummy_tensor)
         
-        
-        # Pass 3: Final Polish
+        # --- Recursive Mask Refinement (Pass 2 -> Pass 3) ---
+        # "Iterative Structure Refinement": Use structure from Pass 2 to guide Pass 3
+        mask_2 = self.causal_mask_net(logits_2)
+        if not self.ablation_no_interleaved:
+            mask_2 = mask_2.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2)
+        attn_mask_2 = mask_2.unsqueeze(1)
+
+        # Pass 3: Final Polish (using Refined Mask)
         if len(base_samples.shape) == 3:
              refined_base_2 = base_samples + deltas_2.unsqueeze(1)
         else:
              refined_base_2 = base_samples + deltas_2
              
         if self.grad_checkpoint and self.training:
-             deltas_final, _, logits_final = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, use_reentrant=False)
+             deltas_final, _, logits_final, aux_3 = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, attn_mask_2, dummy_tensor, use_reentrant=False)
         else:
-             deltas_final, _, logits_final = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None)
+             deltas_final, _, logits_final, aux_3 = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None, attn_mask_2, dummy_tensor)
         
         
         # Returning Dummy Logits/Adj for API compatibility with main.py metrics
@@ -322,14 +424,12 @@ class CausalTransformer(nn.Module):
             
         dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
         
-        # Phase 5: Return REAL logits from final pass
-        # We need to call _forward_pass one last time BUT ask it to compute structure
-        # actually _forward_pass returns deltas, mcm_out, (and now) logits
-        # Let's adjust _forward_pass to return logits too.
+        # Total Aux Loss (Average or Sum?) - Sum encourages all steps to be balanced.
+        total_aux = aux_1 + aux_2 + aux_3
         
-        return deltas_final, logits_final, dummy_adj, None
+        return deltas_final, logits_final, dummy_adj, None, total_aux
 
-    def _forward_pass(self, base_samples, int_samples, target_row, int_mask, mcm_mask):
+    def _forward_pass(self, base_samples, int_samples, target_row, int_mask, mcm_mask, attn_mask=None, dummy_arg=None):
         # Prepare inputs for Encoder (Handle masking)
         enc_int_mask = int_mask
         enc_target = target_row
@@ -346,7 +446,7 @@ class CausalTransformer(nn.Module):
             
         # Shared Forward Logic
         x = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
-        x = self.transformer(x)
+        x = self.transformer(x, attn_mask=attn_mask)
         
         # Extract Value Tokens (embedding of the variable values)
         if self.ablation_no_interleaved:
@@ -357,20 +457,15 @@ class CausalTransformer(nn.Module):
             value_tokens = x[:, 1::2, :]   # (B, N, D)
             
         # Physics Head (MoE)
+        aux_loss = 0.0
         if self.ablation_no_physics:
              # Return zeros
              # deltas shape: (B, N)
              deltas = torch.zeros(value_tokens.shape[0], value_tokens.shape[1], device=value_tokens.device)
         else:
-             deltas = self.moe(value_tokens)
+             deltas, aux_loss = self.moe(value_tokens)
         
-        mcm_out = None
-        if mcm_mask is not None:
-            mcm_out = self.mcm_head(value_tokens).squeeze(-1) # (B, N)
-            
-        mcm_out = None
-        if mcm_mask is not None:
-            mcm_out = self.mcm_head(value_tokens).squeeze(-1) # (B, N)
+
             
         # DAG Prediction (Phase 5)
         logits = torch.zeros(value_tokens.shape[0], value_tokens.shape[1], value_tokens.shape[1], device=value_tokens.device)
@@ -382,9 +477,8 @@ class CausalTransformer(nn.Module):
             
             logits = torch.matmul(Q, K.transpose(-2, -1)) * self.dag_scale
         
-        return deltas, mcm_out, logits
+        return deltas, None, logits, aux_loss
 
     def anneal_temperature(self, epoch, total_epochs):
         # No tau needed for Gumbel (Hard=True)
         return 1.0
-

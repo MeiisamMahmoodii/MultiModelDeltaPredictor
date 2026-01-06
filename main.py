@@ -44,7 +44,7 @@ def cleanup_ddp():
         dist.destroy_process_group()
 
 
-def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
+def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5, intervention_scale=1.0):
     """
     Generates a fixed validation set for a specific number of variables.
     Returns a DataLoader.
@@ -53,9 +53,18 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
     gen = SCMGenerator(
         num_nodes=num_vars, 
         edge_prob=edge_prob, 
-        noise_scale=1.0,
+        noise_scale=1.0, # Fixed noise for comparability
         intervention_prob=intervention_prob
     )
+    # Update Generator's intervention values scale
+    # Default is usually (-2, 2) roughly. If scale=5.0, we want (-10, 10).
+    # SCMGenerator.intervention_values logic might need checking, but usually it's fixed.
+    # Actually SCMGenerator line 186 in generator code: loop_values = [v * intervention_scale for v in self.intervention_values]
+    # So we pass it to `generate_pipeline`? 
+    # `CausalDataset` calls `generate_pipeline`.
+    # `CausalDataset` accepts `intervention_scale_range`. 
+    # If we want FIXED scale for validation, we should set range to (scale, scale).
+    
     # Generate 16 fixed graphs for validation (Speed Optimization)
     dataset = CausalDataset(
         gen, 
@@ -63,9 +72,48 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5):
         samples_per_graph=32, # Reduced from 64
         infinite=False, 
         validation_graphs=16, # Reduced from 64
-        intervention_prob=intervention_prob # Vital: Must match generator
+        intervention_prob=intervention_prob,
+        intervention_scale_range=(intervention_scale, intervention_scale) # Fixed scale
     )
     return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
+
+def evaluate_loader(model, loader, device, description="Validating"):
+    """
+    Evaluates the model on a given dataloader.
+    Returns a dictionary of aggregated metrics.
+    """
+    model.eval()
+    total_metrics = {
+        'mae': 0.0, 'f1': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'n_batches': 0
+    }
+    
+    with torch.no_grad():
+        for batch in loader:
+            base = batch['base'].to(device)
+            int_s = batch['int'].to(device)
+            target = batch['target_row'].to(device)
+            mask = batch['int_mask'].to(device)
+            idx = batch['int_node_idx'].to(device)
+            
+            # Forward
+            deltas, logits, adj, _, _ = model(base, int_s, target, mask, idx)
+            
+            # Metrics
+            total_metrics['mae'] += compute_mae(deltas, batch['delta'].to(device))
+            total_metrics['f1'] += compute_f1(logits, batch['adj'].to(device))
+            tpr, fdr = compute_tpr_fdr(logits, batch['adj'].to(device))
+            total_metrics['tpr'] += tpr
+            total_metrics['fdr'] += fdr
+            total_metrics['n_batches'] += 1
+            
+    # Average
+    n = max(1, total_metrics['n_batches'])
+    return {
+        'mae': total_metrics['mae'] / n,
+        'f1': total_metrics['f1'] / n,
+        'tpr': total_metrics['tpr'] / n,
+        'fdr': total_metrics['fdr'] / n
+    }
 
 def main():
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
@@ -195,6 +243,20 @@ def main():
                 print("Starting with FRESH Optimizer for this Phase.")
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
+        
+        # HOTFIX: Reset Router to break expert collapse from previous phase
+        if is_master:
+            print("Re-initializing MoE Router to break collapse...")
+        with torch.no_grad():
+            # Access router via module if wrapped
+            if hasattr(model, 'module'):
+                router = model.module.moe.router
+            else:
+                router = model.moe.router
+            
+            router.weight.normal_(0, 0.02)
+            router.bias.zero_()
+            
         start_epoch = checkpoint['epoch'] + 1
         if is_master:
             print(f"Resumed at Epoch {start_epoch} | Level {curriculum.current_level}")
@@ -216,7 +278,8 @@ def main():
                 params['max_vars'], 
                 device, 
                 edge_prob=curr_edge_prob,
-                intervention_prob=args.intervention_prob # FIXED: Match training difficulty
+                intervention_prob=args.intervention_prob, # FIXED: Match training difficulty
+                intervention_scale=params['intervention_range']
             )
             current_val_vars = params['max_vars']
             
@@ -236,7 +299,8 @@ def main():
             num_nodes_range=(params['max_vars']-1, params['max_vars']),
             samples_per_graph=64,
             reuse_factor=args.reuse_factor,
-            use_twin_world=not args.ablation_no_twin_world
+            use_twin_world=not args.ablation_no_twin_world,
+            intervention_scale_range=(1.0, 50.0) # Extreme Physics Training: Train on small (1.0) to massive (50.0) interventions
         )
         
         # No DistributedSampler for IterableDataset
@@ -252,7 +316,7 @@ def main():
         total_metrics = {
             "delta": 0.0, "dag": 0.0, "h": 0.0,
             "shd": 0.0, "f1": 0.0, "mae": 0.0,
-            "tpr": 0.0, "fdr": 0.0
+            "tpr": 0.0, "fdr": 0.0, "aux_moe": 0.0
         }
         
         # Progress Bar (Only on Master)
@@ -285,8 +349,8 @@ def main():
             target = batch['target_row'].to(device)
             mask = batch['int_mask'].to(device)
             idx = batch['int_node_idx'].to(device)
-            # Forward (Phase 4: Returns deltas, logits, adj, mcm_out)
-            deltas, logits, adj, _ = model(base, int_s, target, mask, idx)
+            # Forward (Phase 4: Returns deltas, logits, adj, mcm_out, aux_loss)
+            deltas, logits, adj, _, aux_loss = model(base, int_s, target, mask, idx)
             
             # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
             loss, items = causal_loss_fn(
@@ -298,6 +362,10 @@ def main():
                 lambda_h=args.lambda_h,
                 lambda_l1=args.lambda_sparse
             ) 
+            
+            # Add Load Balancing Loss
+            loss += 0.1 * aux_loss # Lambda Aux for Load Balancing
+            items['aux_moe'] = aux_loss.item()
             
             optimizer.zero_grad()
             loss.backward()
@@ -321,106 +389,67 @@ def main():
             total_metrics['tpr'] += tpr
             total_metrics['fdr'] += fdr
                 
-            # Update Progress
             if is_master:
+                # Retrieve MoE Metrics (Handle DDP wrapper)
+                if hasattr(model, 'module'):
+                    moe_metrics = model.module.moe.get_expert_metrics()
+                else:
+                    moe_metrics = model.moe.get_expert_metrics()
+                
                 avg_loss = total_loss / (i + 1)
                 avg_shd = total_metrics['shd'] / (i + 1)
                 avg_f1 = total_metrics['f1'] / (i + 1)
                 avg_mae = total_metrics['mae'] / (i + 1)
-                
                 avg_delta = total_metrics['delta'] / (i + 1)
-                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f} | F1: {avg_f1:.2f} | TPR: {tpr:.2f} | FDR: {fdr:.2f}"
+                
+                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f} | Ent: {moe_metrics['entropy']:.2f} | Gini: {moe_metrics['gini']:.2f}"
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)
                 else:
-                    # ASCII Bar Logic
-                    percent = (i+1) / steps_per_epoch
-                    bar_len = 30
-                    filled_len = int(bar_len * percent)
-                    bar = '=' * filled_len + '>' + '-' * (bar_len - filled_len - 1)
-                    if percent == 1.0: bar = '=' * bar_len
-                    
-                    # \r overwrites the line
-                    print(f"\r[{bar}] {int(percent*100)}% | step: {i+1} | {metric_str}", end='', flush=True)
-            
+                    # ASCII logic simplified
+                    print(f"\rStep {i+1} | {metric_str}", end='', flush=True)
+
             if args.dry_run: break
             
         # --- END OF EPOCH BLOCK (Outside Loop) ---
         if is_master:
             if progress: progress.stop()
-            if not RICH_AVAILABLE: print(flush=True) # Newline after ASCII bar
+            if not RICH_AVAILABLE: print(flush=True)
             
         # Synchronize before validation to prevent timeouts
         if dist.is_initialized():
             dist.barrier()
             
-        # --- Validation Loop (Fixed Set) ---
-        model.eval()
-        val_mae_sum = 0.0
-        val_f1_sum = 0.0
-        val_tpr_sum = 0.0
-        val_fdr_sum = 0.0
-        val_batches = 0
-        
-        # Validation Progress Bar
-        val_progress = None
-        # Dynamic calculation based on current params (approximate but closer)
-        # Scenarios = 1 (Base) + (Vars * IntProb * 3 Values)
-        # Total Steps = Graphs * Scenarios * SamplesPerGraph / BatchSize
-        # Defaults: Graphs=16, IntProb=0.1, Samples=32, Batch=32
-        est_scenarios = 1 + int(current_val_vars * 0.1 * 3)
-        val_steps = 16 * est_scenarios * 32 // 32
+        # --- Validation Loop (Fixed Set & Benchmarks) ---
+        # 1. Evaluate Current Level (All Ranks participate to sync Curriculum)
+        val_metrics = evaluate_loader(model, val_loader, device)
+        val_mae = val_metrics['mae']
+        val_f1 = val_metrics['f1']
         
         if is_master:
-            print(f"Validating on Fixed Set...", flush=True)
-            if RICH_AVAILABLE:
-                val_progress = Progress(
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TaskProgressColumn(),
-                    TimeRemainingColumn(),
-                    TextColumn("[magenta]{task.fields[metrics]}")
+            print(f"Val Level {curriculum.current_level} | MAE: {val_mae:.3f} | F1: {val_f1:.3f} | TPR: {val_metrics['tpr']:.2f} | FDR: {val_metrics['fdr']:.2f}")
+            
+            # 2. Cross-Difficulty Benchmarks (Master Only)
+            # "Novel Solution: Cross-Difficulty Validation"
+            benchmarks = curriculum.get_benchmark_params()
+            print("--- Cross-Difficulty Benchmarks ---")
+            for level_name, b_params in benchmarks.items():
+                # Generate ephemeral loader for benchmark
+                # Use max density for robust testing
+                b_loader = get_validation_set(
+                    b_params['max_vars'],
+                    device,
+                    edge_prob=b_params['density_max'], 
+                    intervention_prob=args.intervention_prob,
+                    intervention_scale=b_params['intervention_range']
                 )
-                val_task = val_progress.add_task("[green]Validating", total=val_steps, metrics="MAE: ...")
-                val_progress.start()
+                b_metrics = evaluate_loader(model, b_loader, device, description=level_name)
+                print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | F1: {b_metrics['f1']:.3f}")
+            print("-----------------------------------")
 
-        with torch.no_grad():
-            for val_i, val_batch in enumerate(val_loader):
-                base = val_batch['base_samples'].to(device)
-                int_s = val_batch['int_samples'].to(device)
-                target = val_batch['target_row'].to(device)
-                mask = val_batch['int_mask'].to(device)
-                idx = val_batch['int_node_idx'].to(device)
-                
-                deltas, logits, adj, _ = model(base, int_s, target, mask, idx)
-                
-                # Metrics
-                batch_mae = compute_mae(deltas, val_batch['delta'].to(device))
-                batch_f1 = compute_f1(logits, val_batch['adj'].to(device))
-                batch_tpr, batch_fdr = compute_tpr_fdr(logits, val_batch['adj'].to(device))
-                
-                val_mae_sum += batch_mae
-                val_f1_sum += batch_f1
-                val_tpr_sum += batch_tpr
-                val_fdr_sum += batch_fdr
-                val_batches += 1
-                
-                if is_master and val_progress:
-                     val_progress.update(val_task, advance=1, metrics=f"MAE: {val_mae_sum/val_batches:.3f}")
-                elif is_master:
-                     # ASCII Fallback
-                     print(f"\r[Validating] Step {val_batches}/{val_steps} | MAE: {val_mae_sum/val_batches:.3f}", end='', flush=True)
-
-        if is_master and val_progress:
-            val_progress.stop()
-        elif is_master:
-            print(flush=True) # Newline after ASCII Val Bar
-                
-        val_mae = val_mae_sum / max(1, val_batches)
-        val_f1 = val_f1_sum / max(1, val_batches)
-        val_tpr = val_tpr_sum / max(1, val_batches)
-        val_fdr = val_fdr_sum / max(1, val_batches)
+        val_tpr = val_metrics['tpr']
+        val_fdr = val_metrics['fdr']
         
         # Step Scheduler (Cosine uses epoch, not val metric)
         scheduler.step(epoch + i / steps_per_epoch) # Update with partial epoch for smoother cosine
@@ -436,6 +465,12 @@ def main():
         
         # 2. Print Summary (Master Only)
         if is_master:
+            # Re-fetch metrics for summary
+            if hasattr(model, 'module'):
+                moe_metrics = model.module.moe.get_expert_metrics()
+            else:
+                moe_metrics = model.moe.get_expert_metrics()
+
             if RICH_AVAILABLE:
                 table = Table(title=f"Epoch {epoch} Summary | Level {curriculum.current_level}")
                 table.add_column("Metric", style="cyan", no_wrap=True)
@@ -445,8 +480,8 @@ def main():
                 table.add_row("Total Loss", f"{avg_loss:.4f}", "-")
                 table.add_row("MAE (L1)", f"{total_metrics['mae']/(i+1):.4f}", f"{val_mae:.4f}")
                 table.add_row("SHD", f"{avg_shd:.2f}", "-")
-                table.add_row("F1 Score", f"{total_metrics['f1']/(i+1):.4f}", f"{val_f1:.4f}")
-                table.add_row("TPR", f"{total_metrics['tpr']/(i+1):.4f}", f"{val_tpr:.4f}")
+                table.add_row("Expert Entropy", f"{moe_metrics['entropy']:.4f}", "-")
+                table.add_row("Expert Gini", f"{moe_metrics['gini']:.4f}", "-")
                 table.add_row("LR", f"{optimizer.param_groups[0]['lr']:.2e}", "")
                 
                 rprint(table)

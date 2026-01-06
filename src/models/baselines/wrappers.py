@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 try:
     from causallearn.search.ConstraintBased.PC import pc
     from causallearn.search.ScoreBased.GES import ges
-    from causallearn.utils.Cit import chisq, fisherz
+    from causallearn.utils.cit import fisherz
     CAUSAL_LEARN_AVAILABLE = True
 except ImportError:
     CAUSAL_LEARN_AVAILABLE = False
@@ -35,9 +35,10 @@ class BaselineModel(ABC):
         pass
 
 class PCWrapper(BaselineModel):
-    def __init__(self, alpha=0.05):
+    def __init__(self, alpha=0.05, max_k=2):
         self.alpha = alpha
         self.adj = None
+        self.max_k = max_k
         
     def fit(self, X, **kwargs):
         if not CAUSAL_LEARN_AVAILABLE:
@@ -45,17 +46,11 @@ class PCWrapper(BaselineModel):
         
         # PC returns a CausalGraph object
         # fisherz is standard for continuous data
-        cg = pc(X, self.alpha, fisherz) 
+        cg = pc(X, self.alpha, fisherz, stable=True, uc_rule=0, uc_priority=-1, max_k=self.max_k)
         self.adj = cg.G.graph # extract graph structure
         
     def predict_adj(self):
-        # Convert causal-learn graph to binary adj
-        # graph is (N, N) where -1=tail, 1=head? 
-        # causal-learn: -1 -- -1 (edge), -1 -> 1 (arrow)
-        # We need to parse it carefully or assume it's roughly adj
-        # Actually cg.G.graph is the adj matrix representation
-        # Let's clean it to 0/1 for DAG comparison (treating undirected as bi-directed or ignoring)
-        # For simplicity in benchmarks (since PC learns CPDAGs), we treat undirected as bidirectional
+        # Convert causal-learn graph to binary adj; treat undirected as bidirectional for SHD fairness
         return (self.adj != 0).astype(int)
 
 class GESWrapper(BaselineModel):
@@ -81,7 +76,7 @@ class NotearsWrapper(BaselineModel):
         # Using the project's own reference implementation if available, 
         # or a simplified internal one.
         # Check src/models/baselines/notears.py
-        from src.models.baselines.notears import notears_linear, notears_nonlinear
+        from src.models.baselines.notears import NotearsLinear
         
         # Use linear for speed or nonlinear for fairness? 
         # Paper compares against NOTEARS-MLP (Nonlinear)
@@ -89,7 +84,8 @@ class NotearsWrapper(BaselineModel):
         # Let's try Nonlinear if available, else Linear.
         
         # Assumption: X is (Samples, Nodes)
-        self.adj = notears_linear(X, lambda1=0.1, loss_type='l2')
+        nt = NotearsLinear(d=X.shape[1], lambda1=0.1)
+        self.adj = nt.fit(torch.tensor(X, dtype=torch.float32))
         # TODO: switch to notears_nonlinear wrapper if needed
         
     def predict_adj(self):

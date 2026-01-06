@@ -4,7 +4,7 @@ import networkx as nx
 from torch.utils.data import IterableDataset
 
 class CausalDataset(IterableDataset):
-    def __init__(self, generator, num_nodes_range=(5, 10), samples_per_graph=100, edge_prob=0.3, intervention_prob=0.5, infinite=True, validation_graphs=32, reuse_factor=1, use_twin_world=True):
+    def __init__(self, generator, num_nodes_range=(5, 10), samples_per_graph=100, edge_prob=0.3, intervention_prob=0.5, infinite=True, validation_graphs=32, reuse_factor=1, use_twin_world=True, intervention_scale_range=(1.0, 1.0)):
         self.generator = generator
         self.num_nodes_range = num_nodes_range
         self.samples_per_graph = samples_per_graph
@@ -14,13 +14,17 @@ class CausalDataset(IterableDataset):
         self.validation_graphs = validation_graphs
         self.reuse_factor = reuse_factor
         self.use_twin_world = use_twin_world
+        self.intervention_scale_range = intervention_scale_range
     
     def __iter__(self):
         graphs_generated = 0
         while True:
             if not self.infinite and graphs_generated >= self.validation_graphs:
                 break
-                
+            
+            # Sample Random Intervention Scale
+            scale = np.random.uniform(self.intervention_scale_range[0], self.intervention_scale_range[1])
+            
             n = np.random.randint(self.num_nodes_range[0], self.num_nodes_range[1] + 1)
             res = self.generator.generate_pipeline(
                 num_nodes=n,
@@ -30,6 +34,7 @@ class CausalDataset(IterableDataset):
                 intervention_prob=self.intervention_prob,
                 as_torch=True,
                 use_twin_world=self.use_twin_world,
+                intervention_scale=scale
             )
             
             graphs_generated += 1

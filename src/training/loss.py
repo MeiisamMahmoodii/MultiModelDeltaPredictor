@@ -56,10 +56,11 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
         # Optimization: Only calculate H on a subset or accumulate?
         # Let's try iterating for now (Batch=16, 32 is small).
         
-        h_sum = 0
-        for i in range(len(adj_prob)):
-             h_sum += compute_h_loss(adj_prob[i])
-        loss_h = h_sum / len(adj_prob)
+        # Consensus DAG Approximation (O(N^3) instead of O(B*N^3))
+        # We compute h-loss on the MEAN adjacency of the batch.
+        # This approximates the "average acyclicity" and significantly speeds up training.
+        adj_mean = adj_prob.mean(dim=0)
+        loss_h = compute_h_loss(adj_mean)
 
     loss_l1 = 0.0
     if lambda_l1 > 0:
