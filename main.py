@@ -509,7 +509,7 @@ def main():
         val_fdr = val_metrics['fdr']
         
         # Step Scheduler (Cosine uses epoch, not val metric)
-        scheduler.step(epoch + i / steps_per_epoch) # Update with partial epoch for smoother cosine
+        scheduler.step() # Update per epoch (SequentialLR doesn't support fractional epochs)
         
         # Calculate Epoch Metrics (Training Avg)
         i = max(1, i) # Avoid div by zero if loop didn't run
