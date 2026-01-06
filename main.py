@@ -89,8 +89,8 @@ def evaluate_loader(model, loader, device, description="Validating"):
     
     with torch.no_grad():
         for batch in loader:
-            base = batch['base'].to(device)
-            int_s = batch['int'].to(device)
+            base = batch['base_samples'].to(device)
+            int_s = batch['int_samples'].to(device)
             target = batch['target_row'].to(device)
             mask = batch['int_mask'].to(device)
             idx = batch['int_node_idx'].to(device)
