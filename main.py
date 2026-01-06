@@ -224,11 +224,13 @@ def main():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     
-    # Scheduler: Cosine Annealing with Warm Restarts
+    # Scheduler: Linear Warmup (5 epochs) + Cosine Annealing with Warm Restarts
     # Restart every 50 epochs, doubling the period each time (T_mult=2)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    scheduler_warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=5)
+    scheduler_main = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=50, T_mult=2, eta_min=1e-8
     )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_main], milestones=[5])
     
     start_epoch = 0
     
