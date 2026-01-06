@@ -322,7 +322,18 @@ def main():
         
         # No DistributedSampler for IterableDataset
         # Each rank has its own process and generator state.
-        dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn_pad, sampler=None)
+        # OPTIMIZATION: Multi-worker data loading to prevent GPU idle
+        # num_workers=8 spawns 8 CPU threads to generate data in parallel
+        # prefetch_factor=2 prefetches 2 batches ahead to avoid GPU stalls
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=args.batch_size, 
+            collate_fn=collate_fn_pad, 
+            sampler=None,
+            num_workers=8,
+            prefetch_factor=2,
+            persistent_workers=True
+        )
         
         # Train 1 Epoch (which is infinite stream, so we define steps)
         # "Infinite" Dataset: We define an epoch as 2000 steps (~64k samples)
