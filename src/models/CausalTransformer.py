@@ -158,17 +158,26 @@ class MoELayer(nn.Module):
             
         probs = self.expert_counts / self.total_tokens
         
-        # Entropy: -sum(p * log(p))
-        entropy = -torch.sum(probs * torch.log(probs + 1e-10))
+        # Entropy: -sum(p * log(p)), with safety guards
+        # Clamp probabilities to avoid log(0)
+        probs_safe = torch.clamp(probs, min=1e-10, max=1.0)
+        entropy = -torch.sum(probs_safe * torch.log(probs_safe))
         
         sorted_probs, _ = torch.sort(probs)
         n = self.num_experts
         index = torch.arange(1, n + 1, device=probs.device, dtype=probs.dtype)
         gini = (2.0 * torch.sum(index * sorted_probs) / (n * torch.sum(sorted_probs) + 1e-10)) - (n + 1.0) / n
         
+        entropy_val = entropy.item()
+        gini_val = gini.item()
+        
+        # Safety checks
+        entropy_val = 0.0 if (entropy_val != entropy_val) or (entropy_val > 1e6) else entropy_val
+        gini_val = 0.0 if (gini_val != gini_val) or (gini_val > 1e6) else gini_val
+        
         return {
-            "entropy": entropy.item(), 
-            "gini": gini.item(),
+            "entropy": entropy_val, 
+            "gini": gini_val,
             "counts": self.expert_counts.cpu().numpy().tolist()
         }
 

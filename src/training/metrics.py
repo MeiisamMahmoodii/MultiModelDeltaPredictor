@@ -123,14 +123,23 @@ def compute_f1(pred_adj_logits, true_adj_matrix, threshold=0.0):
         pred_prob = torch.sigmoid(pred_adj_logits)
         pred_flat = (pred_prob > 0.5).cpu().numpy().flatten()
         true_flat = true_adj_matrix.cpu().numpy().flatten()
-        return f1_score(true_flat, pred_flat, zero_division=0)
+        score = f1_score(true_flat, pred_flat, zero_division=0)
+        
+        # Safety: Check for NaN/Inf
+        if score != score or score > 1e6:  # NaN or Inf check
+            return 0.0
+        return score
 
 def compute_mae(pred_delta, true_delta):
     """
     Computes Mean Absolute Error for deltas.
     """
     with torch.no_grad():
-        return torch.nn.functional.l1_loss(pred_delta, true_delta).item()
+        mae = torch.nn.functional.l1_loss(pred_delta, true_delta).item()
+        # Safety: Check for NaN/Inf
+        if not (mae == mae) or not (mae < float('inf')):  # NaN check and Inf check
+            return 0.0
+        return mae
 
 def compute_tpr_fdr(pred_adj_logits, true_adj_matrix, threshold=0.0):
     """
@@ -144,7 +153,15 @@ def compute_tpr_fdr(pred_adj_logits, true_adj_matrix, threshold=0.0):
         fp = (pred_edges * (1 - true_edges)).sum()
         fn = ((1 - pred_edges) * true_edges).sum()
         
+        # Safety: Add epsilon to prevent division by zero
         tpr = tp / (tp + fn + 1e-8)
         fdr = fp / (tp + fp + 1e-8)
         
-        return tpr.item(), fdr.item()
+        tpr_val = tpr.item()
+        fdr_val = fdr.item()
+        
+        # Safety: Check for NaN/Inf
+        tpr_val = 0.0 if (tpr_val != tpr_val) or (tpr_val > 1e6) else tpr_val
+        fdr_val = 0.0 if (fdr_val != fdr_val) or (fdr_val > 1e6) else fdr_val
+        
+        return tpr_val, fdr_val

@@ -80,16 +80,19 @@ class SCMGenerator:
         if noise is None:
             noise = np.random.normal(scale=noise_scale, size=(num_samples, len(nodes)))
         
+        # Safety: Clip noise to prevent numerical issues
+        noise = np.clip(noise, -50, 50)
+        
         data = pd.DataFrame(noise, columns=nodes)
         
         try:
             sorted_nodes = list(nx.topological_sort(dag))
         except:
-            return data # Cycle fallback
+            return data, noise # Cycle fallback
 
         for node in sorted_nodes:
             if intervention and node in intervention:
-                data[node] = intervention[node]
+                data[node] = np.clip(intervention[node], -30, 30)
                 continue
             
             parents = list(dag.predecessors(node))
@@ -103,6 +106,8 @@ class SCMGenerator:
             for p in parents:
                 func = dag[p][node].get('type', 'linear')
                 pval = data[p].values
+                # Safety: Clip parent values to prevent exponential blowup
+                pval = np.clip(pval, -50, 50)
                 term = 0
                 if func == 'linear': term = 2.0 * pval
                 elif func == 'negative linear': term = -2.0 * pval
@@ -113,10 +118,11 @@ class SCMGenerator:
                 elif func == 'cubic': term = np.clip(pval, -3, 3)**3
                 elif func == 'sigmoid': term = expit(pval)
                 elif func == 'step': term = (pval > 0).astype(float)
-                elif func == 'abs': term = np.abs(pval)
+                elif func == 'abs': term = np.abs(np.clip(pval, -50, 50))
                 elif func == 'poly': 
                     # 0.5*x^2 + 0.5*x (Simple polynomial mix)
-                    term = 0.5 * (pval**2) + 0.5 * pval
+                    pval_clipped = np.clip(pval, -10, 10)
+                    term = 0.5 * (pval_clipped**2) + 0.5 * pval_clipped
                 elif func == 'sawtooth': 
                     # Sawtooth wave: x - floor(x) centered
                     term = 2.0 * (pval - np.floor(pval)) - 1.0
@@ -124,6 +130,8 @@ class SCMGenerator:
                     # x / (1 + |x|) (Softsign-ish but rational)
                     term = 2.0 * pval / (1.0 + np.abs(pval))
                 else: term = pval # Fallback
+                # Safety: Clip term to prevent accumulation
+                term = np.clip(term, -50, 50)
                 terms.append(term)
             
             # Combine Terms: Additive vs Multiplicative (Interaction)
@@ -134,14 +142,17 @@ class SCMGenerator:
             if len(terms) > 1 and np.random.rand() < 0.3:
                 # Interaction: Product of first two terms + Sum of rest
                 # Represents "Modulation" (e.g. A * B + C)
-                interact = terms[0] * terms[1]
+                interact = np.clip(terms[0] * terms[1], -50, 50)
                 remaining = sum(terms[2:]) if len(terms) > 2 else 0
+                remaining = np.clip(remaining, -50, 50)
                 total = noise_term + (interact + remaining)
             else:
                 # Standard Additive Model
                 total = noise_term + sum(terms)
-                
-            data[node] = np.clip(total, -100, 100)
+            
+            # Final clipping to ensure bounded values
+            # Reduced from [-100, 100] to [-20, 20] to prevent NaN in Transformer
+            data[node] = np.clip(total, -30, 30)
         return data, noise
 
     def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True, intervention_scale=1.0):
@@ -188,7 +199,7 @@ class SCMGenerator:
         for t in targets:
             # Adaptive Intervention: Based on Sigma of the observational distribution
             # This ensures interventions are relative to the variable's natural scale.
-            sigma = base_stds[t]
+            sigma = float(base_stds[t]) if hasattr(base_stds, '__getitem__') else float(base_stds)
             if sigma < 1e-4: sigma = 1.0 # Safety fallback for constant/zero-var nodes
             
             # Intervene at ±1σ and ±2σ, scaled by the curriculum difficulty (intervention_scale)

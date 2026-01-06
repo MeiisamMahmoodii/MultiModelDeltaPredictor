@@ -12,12 +12,17 @@ class FourierEmbedding(nn.Module):
         
     def forward(self, x):
         # x: (..., 1)
+        # Safety: Clip input to prevent numerical issues
+        x = torch.clamp(x, -50, 50)
         # Periodic encoding
         x_proj = x * self.freqs.to(x.device) * torch.pi # (..., L)
         x_sin = torch.sin(x_proj)
         x_cos = torch.cos(x_proj)
         x_cat = torch.cat([x_sin, x_cos], dim=-1) # (..., 2L)
-        return self.proj(x_cat) * self.result_scale
+        result = self.proj(x_cat) * self.result_scale
+        # Safety: Clip output to prevent overflow
+        result = torch.clamp(result, -100, 100)
+        return result
 
 class HybridEmbedding(nn.Module):
     """
@@ -48,12 +53,23 @@ class HybridEmbedding(nn.Module):
 
     def forward(self, x):
         # x: (..., 1)
+        # Safety: Clip input
+        x = torch.clamp(x, -50, 50)
+        
         l = self.linear_emb(x)
         f = self.fourier_emb(x)
         m = self.mlp_emb(x)
         
+        # Safety: Clip embeddings to prevent overflow
+        l = torch.clamp(l, -100, 100)
+        f = torch.clamp(f, -100, 100)
+        m = torch.clamp(m, -100, 100)
+        
         cat = torch.cat([l, f, m], dim=-1) # (..., d_model)
-        return self.norm(self.mixer(cat))
+        mixed = self.mixer(cat)
+        # Safety: Clip mixed output
+        mixed = torch.clamp(mixed, -100, 100)
+        return self.norm(mixed)
 
 class InterleavedEncoder(nn.Module):
     """

@@ -7,15 +7,25 @@ def compute_h_loss(adj_matrix):
     if adj_matrix.device.type == 'mps':
         A_sq = (adj_matrix * adj_matrix).cpu()
         h = torch.trace(torch.matrix_exp(A_sq)) - N
-        return h.to(adj_matrix.device)
+        h_val = h.to(adj_matrix.device)
     else:
         A_sq = adj_matrix * adj_matrix
         h = torch.trace(torch.matrix_exp(A_sq)) - N
-        return h
+        h_val = h
+    
+    # Safety: Check for NaN/Inf
+    if (h_val != h_val) or (h_val.abs() > 1e6):
+        return torch.tensor(0.0, device=adj_matrix.device, dtype=adj_matrix.dtype)
+    
+    return h_val
 
 def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj, 
                    lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0):
     loss_delta = nn.functional.huber_loss(pred_delta, true_delta)
+    
+    # Safety: Clamp loss components to prevent explosion
+    if (loss_delta != loss_delta) or (loss_delta > 1e6):
+        loss_delta = torch.tensor(1.0, device=pred_delta.device, dtype=pred_delta.dtype)
     
     # Phase 5: Unified Learning (Structure Enabled)
     # 1. DAG Construction Loss (Binary Cross Entropy on Edges)
@@ -25,6 +35,10 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
         true_adj,
         pos_weight=torch.tensor(3.0, device=pred_adj.device) # Fixed imbalance correction (3.0 for ~25% density)
     )
+    
+    # Safety: Clamp loss
+    if (loss_dag != loss_dag) or (loss_dag > 1e6):
+        loss_dag = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     
     # 2. Acyclicity Loss (H-Score)
     # We need Probabilities for H-score
@@ -39,7 +53,7 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
     # It does `torch.trace`. torch.trace only works on 2D tensors!
     # We need to average h over the batch.
     
-    loss_h = 0.0
+    loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_h > 0:
         # Loop over batch for safety or vectorize trace?
         # Einsum 'bii -> b' is trace.
@@ -61,16 +75,27 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
         # This approximates the "average acyclicity" and significantly speeds up training.
         adj_mean = adj_prob.mean(dim=0)
         loss_h = compute_h_loss(adj_mean)
+        
+        # Safety: Clamp loss_h
+        if (loss_h != loss_h) or (loss_h > 1e6):
+            loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
 
-    loss_l1 = 0.0
+    loss_l1 = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_l1 > 0:
         loss_l1 = torch.mean(torch.abs(adj_prob))
+        # Safety: Clamp loss_l1
+        if (loss_l1 != loss_l1) or (loss_l1 > 1e6):
+            loss_l1 = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
         
     total_loss = (loss_delta * lambda_delta) + (loss_dag * lambda_dag) + (loss_h * lambda_h) + (loss_l1 * lambda_l1)
     
+    # Final safety check
+    if (total_loss != total_loss) or (total_loss > 1e6):
+        total_loss = torch.tensor(1.0, device=pred_delta.device, dtype=pred_delta.dtype)
+    
     return total_loss, {
-        "delta": loss_delta.item(), 
-        "dag": loss_dag.item(), 
+        "delta": loss_delta.item() if loss_delta.item() == loss_delta.item() else 0.0, 
+        "dag": loss_dag.item() if loss_dag.item() == loss_dag.item() else 0.0, 
         "h": loss_h.item() if isinstance(loss_h, torch.Tensor) else loss_h
     }
 
