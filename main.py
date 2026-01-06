@@ -74,7 +74,7 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5, i
         num_nodes_range=(num_vars, num_vars),
         samples_per_graph=32, # Reduced from 64
         infinite=False, 
-        validation_graphs=16, # Reduced from 64
+        validation_graphs=4, # Reduced from 16 for Speed (~100 batches total)
         intervention_prob=intervention_prob,
         intervention_scale_range=(intervention_scale, intervention_scale) # Fixed scale
     )
