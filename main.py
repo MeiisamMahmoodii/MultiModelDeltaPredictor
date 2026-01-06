@@ -34,7 +34,10 @@ def setup_ddp():
         np.random.seed(local_rank) # Ensure different data per rank
         
         if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
+            # Robust device setting: handle cases where CUDA_VISIBLE_DEVICES masks GPUs per process
+            n_devices = torch.cuda.device_count()
+            if n_devices > 0:
+                torch.cuda.set_device(local_rank % n_devices)
         # MPS doesn't support set_device like CUDA, handled by device object later
         return local_rank
     return 0
