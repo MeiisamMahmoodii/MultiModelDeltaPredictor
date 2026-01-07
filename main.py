@@ -159,6 +159,8 @@ def main():
 
     parser.add_argument("--lambda_h", type=float, default=0.0, help="Weight for Acyclicity loss")
     parser.add_argument("--lambda_sparse", type=float, default=0.0, help="Weight for Sparsity (L1) loss")
+    parser.add_argument("--lambda_aux_moe", type=float, default=0.1, help="Auxiliary load-balancing loss weight for MoE")
+    parser.add_argument("--router_tau", type=float, default=1.0, help="Gumbel-Softmax temperature for MoE router")
     
     # Ablation Flags
     parser.add_argument("--ablation_no_twin_world", action="store_true", help="Disable Twin World Variance Reduction")
@@ -200,7 +202,8 @@ def main():
         ablation_dense=args.ablation_dense_moe,
         ablation_no_interleaved=args.ablation_no_interleaved,
         ablation_no_dag=args.ablation_no_dag,
-        ablation_no_physics=args.ablation_no_physics
+        ablation_no_physics=args.ablation_no_physics,
+        router_tau=args.router_tau
     )
     model.to(device)
     
@@ -418,9 +421,18 @@ def main():
                 lambda_l1=args.lambda_sparse
             ) 
             
-            # Add Load Balancing Loss
-            loss += 0.1 * aux_loss # Lambda Aux for Load Balancing
-            items['aux_moe'] = aux_loss.item()
+            # Add Load Balancing Loss with NaN/Inf guard
+            aux_safe = aux_loss
+            if not isinstance(aux_safe, torch.Tensor):
+                aux_safe = torch.tensor(float(aux_safe), device=loss.device)
+            if torch.isnan(aux_safe) or torch.isinf(aux_safe):
+                aux_safe = torch.tensor(0.0, device=loss.device)
+            loss += args.lambda_aux_moe * aux_safe
+            items['aux_moe'] = aux_safe.item()
+
+            # Final loss safety guard
+            if torch.isnan(loss) or torch.isinf(loss):
+                loss = torch.tensor(1.0, device=loss.device)
             
             optimizer.zero_grad()
             loss.backward()
@@ -557,7 +569,8 @@ def main():
                 header = ["Epoch", "Level", "LR", 
                           "Train_Loss", "Train_Delta", "Train_DAG", "Train_H", 
                           "Train_MAE", "Train_SHD", "Train_F1", "Train_TPR", "Train_FDR", 
-                          "Val_MAE", "Val_SHD", "Val_F1", "Val_TPR", "Val_FDR"]
+                          "Val_MAE", "Val_SHD", "Val_F1", "Val_TPR", "Val_FDR",
+                          "Expert_Entropy", "Expert_Gini"]
                 if not file_exists:
                     writer.writerow(header)
                 
@@ -575,12 +588,13 @@ def main():
                     f"{total_metrics['f1']/train_iters:.4f}",
                     f"{total_metrics['tpr']/train_iters:.4f}",
                     f"{total_metrics['fdr']/train_iters:.4f}",
-                    f"{total_metrics['fdr']/train_iters:.4f}",
                     f"{val_mae:.4f}",
                     f"{val_metrics['shd']:.2f}",
                     f"{val_f1:.4f}",
                     f"{val_tpr:.4f}",
-                    f"{val_fdr:.4f}"
+                    f"{val_fdr:.4f}",
+                    f"{moe_metrics['entropy']:.4f}",
+                    f"{moe_metrics['gini']:.4f}"
                 ])
         
         # 3. Save Checkpoint (Master Only)

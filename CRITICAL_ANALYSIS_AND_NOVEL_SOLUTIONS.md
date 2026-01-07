@@ -1,3 +1,39 @@
+## Design Highlights
+
+### Transformer-Based Causal Discovery
+- Concept: Use a transformer to infer causal structure and intervention-driven effects, learning edge logits and deltas jointly.
+- What we did: Implemented `CausalTransformer` with interleaved tokens, RoPE-style attention and a `LearnedCausalMask` to bias attention using predicted adjacency. The forward returns deltas and adjacency logits in a single pass.
+    - Code: `src/models/CausalTransformer.py` (classes `CausalTransformer`, `LearnedCausalMask`, `RoPEAttentionLayer`).
+    - Training: `main.py` wires inputs from `CausalDataset` and logs structure/function metrics.
+- Impact: Couples representation learning with causal tasks, moving beyond graph-only discovery to unified sequence modeling of causal mechanisms.
+
+### Twin-World Variance Reduction
+- Concept: Pair “base” (observational) with matched “intervention” samples to train on deltas (control variate style), reducing gradient variance and improving sample efficiency.
+- What we did: `CausalDataset` emits `base_samples`, `int_samples`, `delta`, masks and indices; the training loop consumes these paired inputs to target delta prediction directly.
+    - Code: `src/data/CausalDataset.py`, `src/data/collate.py`; used in `main.py`.
+    - Ablation: `--ablation_no_twin_world` to disable pairing.
+- Impact: Stabilizes optimization by focusing on intervention effects rather than raw noisy states.
+
+### Hard MoE for Physics
+- Concept: Specialize experts to mechanism regimes with hard Gumbel routing; track and regularize usage to avoid collapse.
+- What we did: `MoELayer` uses `F.gumbel_softmax(..., hard=True)` for crisp routing; adds an auxiliary load-balancing loss (MSE to uniform importance) and tracks expert usage via entropy/gini.
+    - Code: `src/models/CausalTransformer.py::MoELayer` and `VectorizedDeepExpert`; `get_expert_metrics()` returns `{"entropy", "gini", "counts"}`.
+    - Logging: `main.py` progress line shows `Ent`/`Gini`; per-epoch `training_log.csv` now includes `Expert_Entropy` and `Expert_Gini`.
+- Impact: Encourages specialization across physics-like regimes while maintaining healthy token distribution.
+
+### Unified Structure + Function Learning
+- Concept: Learn graph structure (edges, acyclicity, sparsity) and causal effect magnitudes (deltas) in one loss.
+- What we did: `causal_loss_fn` combines Huber delta loss (scaled by `lambda_delta`), BCE on adjacency logits (`lambda_dag`), acyclicity `h`-score (`lambda_h`), and L1 sparsity (`lambda_l1`).
+    - Code: `src/training/loss.py`; metrics in `src/training/metrics.py` (`compute_shd`, `compute_f1`, `compute_tpr_fdr`, `compute_mae`, `compute_sid`).
+    - Training/Eval: `main.py` logs train/val metrics and saves `training_log.csv` each epoch.
+- Impact: Avoids two-stage pipelines (discover graph then estimate parameters), enabling mutual reinforcement between structure and effect learning.
+
+### Multi-Dimensional Curriculum
+- Concept: Progress difficulty along multiple axes (graph size, density, intervention range) rather than a single dimension.
+- What we did: `CurriculumManager` adjusts `max_vars`, density range, and `intervention_range` by level; uses validation MAE/F1 to trigger level-ups and runs cross-difficulty benchmarks.
+    - Code: `src/training/curriculum.py` (state, params, update); `main.py` regenerates validation sets and prints `--- Cross-Difficulty Benchmarks ---` per epoch.
+- Impact: Smoother convergence and better generalization by gradually increasing problem complexity across structure and intervention scales.
+
 # ISD-CP: Critical Analysis, Problems & Novel Solutions
 
 **Analysis Date**: January 6, 2026  

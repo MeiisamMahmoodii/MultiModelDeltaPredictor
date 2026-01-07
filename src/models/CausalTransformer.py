@@ -96,9 +96,10 @@ class MoELayer(nn.Module):
     Vectorized Mixture of Experts Layer.
     Refactored for Hard Gumbel Routing (Scenario 7).
     """
-    def __init__(self, d_model, num_experts=8, num_layers_per_expert=4):
+    def __init__(self, d_model, num_experts=8, num_layers_per_expert=4, router_tau=1.0):
         super().__init__()
         self.num_experts = num_experts
+        self.tau = router_tau
         
         # 1. Vectorized Experts
         self.experts = VectorizedDeepExpert(d_model, num_experts, num_layers_per_expert)
@@ -123,7 +124,7 @@ class MoELayer(nn.Module):
         # 1. Router (Hard Gumbel Switch)
         logits = self.router(x_flat) # (Total, Experts)
         # Use Gumbel Softmax (Hard=True) for crisp expert selection
-        weights = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1) # (Total, Experts)
+        weights = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1) # (Total, Experts)
         
         # Aux Loss: Load Balancing
         probs = F.softmax(logits, dim=-1) # (Total, Experts)
@@ -306,7 +307,8 @@ class CausalTransformer(nn.Module):
     - NO DAG HEAD (Decoupled)
     """
     def __init__(self, num_nodes, d_model=256, nhead=8, num_layers=12, grad_checkpoint=False, 
-                 ablation_dense=False, ablation_no_interleaved=False, ablation_no_dag=False, ablation_no_physics=False):
+                 ablation_dense=False, ablation_no_interleaved=False, ablation_no_dag=False, ablation_no_physics=False,
+                 router_tau=1.0):
         super().__init__()
         self.num_nodes = num_nodes
         self.grad_checkpoint = grad_checkpoint
@@ -331,7 +333,7 @@ class CausalTransformer(nn.Module):
         # 3. Universal MoE Layer (Hard Gumbel)
         # Ablation: Dense = 1 Expert (Trivial Routing)
         num_experts = 1 if ablation_dense else 8
-        self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=4)
+        self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=4, router_tau=router_tau)
         
         # 4. Learned Causal Mask (Phase 3 Hotfix: Topology-Aware Attention)
         # "Novel Solution: Learned Causal Masking"
