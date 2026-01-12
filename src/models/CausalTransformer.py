@@ -299,6 +299,28 @@ class RoPETransformer(nn.Module):
 
 class CausalTransformer(nn.Module):
     """
+    Unified Causal Transformer (Phase 4 "Physics-First" Architecture).
+
+    A specialized Transformer designed to predict the *consequences* of interventions (deltas)
+    rather than just the graph structure.
+
+    Architectural Pillars:
+    1.  **Rotary Positional Embeddings (RoPE)**:
+        - Encodes variable identity ($X_1$ vs $X_2$) relative to others, preserving permutation equivariance where appropriate.
+    2.  **Hard-Gumbel Mixture of Experts (MoE)**:
+        - Replaces the standard FFN with 8 "Expert" MLPs.
+        - Using Hard Gumbel Softmax ensures discrete routing (each token goes to specific experts),
+          allowing experts to specialize in different functional forms (Linear, Polynomial, Step, etc.).
+    3.  **Learned Causal Mask**:
+        - A dedicated head predicts a soft adjacency matrix ($A$) from the input context.
+        - This matrix biases the Self-Attention mechanism, forcing the model to attend to "Parents" when predicting "Children".
+    4.  **Iterative Structure Refinement (3-Pass)**:
+        - **Pass 1**: Rapid guess of structure and deltas.
+        - **Pass 2**: Refine the Causal Mask based on Pass 1's structure.
+        - **Pass 3**: Final Delta prediction using the high-fidelity mask.
+        - This allows gradients from the Physics Loss (MAE) to backpropagate and refine the Structure Head.
+    """
+    """
     Unified Causal Transformer (Phase 4 "Physics-First")
     Features:
     - RoPE (Relative Positions)

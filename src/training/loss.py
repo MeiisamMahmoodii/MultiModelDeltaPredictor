@@ -21,7 +21,7 @@ def compute_h_loss(adj_matrix):
 
 def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj, 
                    lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0):
-    loss_delta = nn.functional.huber_loss(pred_delta, true_delta)
+    loss_delta = nn.functional.l1_loss(pred_delta, true_delta)
     
     # Safety: Clamp loss components to prevent explosion
     if (loss_delta != loss_delta) or (loss_delta > 1e6):

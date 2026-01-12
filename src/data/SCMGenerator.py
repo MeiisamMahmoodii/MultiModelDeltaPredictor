@@ -7,6 +7,21 @@ from typing import List, Optional
 from scipy.special import expit
 
 class SCMGenerator:
+    """
+    Structural Causal Model (SCM) Generator for Synthetic Data.
+
+    Generates random DAGs and associated data based on a variety of physical mechanisms
+    (Linear, Polynomial, Step, Sinusoidal, etc.).
+
+    Key Features:
+    1.  **Twin World Generation**: 
+        - Generates observational data ($X$) and interventional data ($X | do(I)$) using the SAME noise vector ($\epsilon$).
+        - This allows for precise calculation of the causal effect $\Delta = X_{int} - X_{base}$ by canceling out noise variance.
+    2.  **Diverse Mechanisms**:
+        - Supports 16 different edge functions (linear, exp, sigmoid, rational, etc.) to test model generalization.
+    3.  **Adaptive Scaling**:
+        - Intervention magnitudes are scaled relative to the variable's natural standard deviation ($\sigma$).
+    """
     def __init__(
         self,
         num_nodes: int = 10,
@@ -17,6 +32,18 @@ class SCMGenerator:
         intervention_values: Optional[List[float]] = None,
         seed: Optional[int] = None,
     ):
+        """
+        Initialize the SCM Generator.
+
+        Args:
+            num_nodes (int): Number of variables in the graph.
+            edge_prob (float): Probability of an edge existing between two nodes (sparsity).
+            noise_scale (float): Standard deviation of the additive Gaussian noise.
+            num_samples_per_intervention (int): Number of samples to generate per intervention setting.
+            intervention_prob (float): Probability of creating an intervention target (used in pipeline).
+            intervention_values (List[float]): Raw values for interventions (superseded by adaptive scaling).
+            seed (int): Random seed for reproducibility.
+        """
         self.num_nodes = num_nodes
         self.edge_prob = edge_prob
         self.noise_scale = noise_scale
