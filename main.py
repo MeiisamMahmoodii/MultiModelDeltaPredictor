@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from src.data.CausalDataset import CausalDataset
 from src.data.SCMGenerator import SCMGenerator
-from src.data.encoder import collate_fn_pad
+from src.data.collate import collate_fn_pad
 from src.models.CausalTransformer import CausalTransformer
 from src.training.curriculum import CurriculumManager
 from src.training.loss import causal_loss_fn
