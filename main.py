@@ -90,6 +90,7 @@ def evaluate_loader(model, loader, device, description="Validating"):
     total_mae = 0.0
     all_logits = []
     all_adj = []
+    num_batches = 0
     
     with torch.no_grad():
         # Setup Progress Bar
@@ -118,7 +119,6 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 idx = batch['int_node_idx'].to(device)
                 
                 # Forward
-                # Forward
                 deltas, logits, adj, _, _ = model(base, int_s, target, mask)
                 
                 # Compute Loss (Standard validation loss)
@@ -129,19 +129,20 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 # Collect Structure Predictions (CPU to save GPU memory)
                 all_logits.append(logits.cpu())
                 all_adj.append(batch['adj'].cpu())
+                num_batches += 1
                 
         finally:
             if progress_ctx: progress_ctx.stop()
             
     # Aggregate results
-    if len(all_logits) == 0:
+    if num_batches == 0:
         return {'mae': 0.0, 'f1': 0.0, 'shd': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'loss': 0.0}
 
     # Concatenate all logits/adj
     all_logits = torch.cat(all_logits, dim=0)
     all_adj = torch.cat(all_adj, dim=0)
     
-    avg_mae = total_mae / len(loader) if len(loader) > 0 else 0.0
+    avg_mae = total_mae / num_batches
     
     # 1. Standard Metrics (Threshold 0.0 -> Prob 0.5)
     f1_std = compute_f1(all_logits, all_adj, threshold=0.0)
