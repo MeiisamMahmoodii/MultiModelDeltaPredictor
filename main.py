@@ -1,38 +1,7 @@
 import argparse
 import random
-import csv
-import os
-from datetime import timedelta
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from src.models.CausalTransformer import CausalTransformer
-from src.data.SCMGenerator import SCMGenerator
-from src.data.CausalDataset import CausalDataset
-from src.data.collate import collate_fn_pad
-from src.training.loss import causal_loss_fn
-from src.training.curriculum import CurriculumManager
-from src.training.metrics import compute_shd, compute_f1, compute_mae, compute_tpr_fdr
-try:
-    from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
-    from rich.table import Table
-    from rich import print as rprint
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
-
-def setup_ddp():
-    if "LOCAL_RANK" in os.environ:
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        # Increase timeout to 30 mins for complex graph generation
-        dist.init_process_group(backend, timeout=timedelta(minutes=30))
-        local_rank = int(os.environ["LOCAL_RANK"])
-        import numpy as np
-        np.random.seed(local_rank) # Ensure different data per rank
-        
+        if is_master:
+            print(f"Val Level {curriculum.current_level} | MAE: {val_mae:.3f} | SHD: {val_metrics['shd']:.1f} | F1: {val_f1:.3f} | TPR: {val_tpr:.2f} | FDR: {val_metrics['fdr']:.2f}")
         if torch.cuda.is_available():
             # Robust device setting: handle cases where CUDA_VISIBLE_DEVICES masks GPUs per process
             n_devices = torch.cuda.device_count()
