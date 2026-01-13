@@ -359,26 +359,26 @@ def main():
     # Always ensure Router is initialized properly at start (Fresh)
     # Broadcast weights from Rank 0 to ensure consistency in DDP (since RNG is seeded differently per rank)
     if not args.resume:
-        if is_master: print("Initializing MoE Router (Fresh Start)...")
-        with torch.no_grad():
-             if hasattr(model, 'module'):
-                 router = model.module.moe.router
-             else:
-                 router = model.moe.router
-             
-             if is_master:
-                 router.weight.normal_(0, 0.02)
-                 router.bias.zero_()
+        if is_master: print("Initializing MoE Routers (Fresh Start)...")
         
-        # ISSUE 10: Broadcast to sync initialization across ranks
-        # Broadcast parameter data (not the parameter itself) to avoid autograd warnings
-        if dist.is_initialized():
-            if hasattr(model, 'module'):
-                 router = model.module.moe.router
-            else:
-                 router = model.moe.router
-            dist.broadcast(router.weight.data, src=0)
-            dist.broadcast(router.bias.data, src=0)
+        # Access layers
+        if hasattr(model, 'module'):
+            transformer_layers = model.module.transformer.layers
+        else:
+            transformer_layers = model.transformer.layers
+            
+        with torch.no_grad():
+            for layer_idx, layer in enumerate(transformer_layers):
+                router = layer.moe.router
+                
+                if is_master:
+                    router.weight.normal_(0, 0.02)
+                    router.bias.zero_()
+                
+                # Broadcast to sync across ranks
+                if dist.is_initialized():
+                    dist.broadcast(router.weight.data, src=0)
+                    dist.broadcast(router.bias.data, src=0)
 
     for epoch in range(start_epoch, args.epochs):
         # Update Curriculum Stats
