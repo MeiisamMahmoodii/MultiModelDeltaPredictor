@@ -371,13 +371,14 @@ def main():
                  router.bias.zero_()
         
         # ISSUE 10: Broadcast to sync initialization across ranks
+        # Broadcast parameter data (not the parameter itself) to avoid autograd warnings
         if dist.is_initialized():
             if hasattr(model, 'module'):
                  router = model.module.moe.router
             else:
                  router = model.moe.router
-            dist.broadcast(router.weight, src=0)
-            dist.broadcast(router.bias, src=0)
+            dist.broadcast(router.weight.data, src=0)
+            dist.broadcast(router.bias.data, src=0)
 
     for epoch in range(start_epoch, args.epochs):
         # Update Curriculum Stats
