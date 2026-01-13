@@ -604,7 +604,9 @@ def main():
         # --- Validation Loop (Fixed Set & Benchmarks) ---
         # 1. Evaluate Current Level (All Ranks participate to sync Curriculum)
         if is_master: print(f"Validating Current Level {curriculum.current_level}...", flush=True)
-        val_metrics = evaluate_loader(model, val_loader, device)
+        # Only show progress bar on Master
+        val_desc = "Validating" if is_master else ""
+        val_metrics = evaluate_loader(model, val_loader, device, description=val_desc)
         val_mae = val_metrics['mae']
         val_f1 = val_metrics['f1']
         
@@ -627,7 +629,7 @@ def main():
                     intervention_prob=args.intervention_prob,
                     intervention_scale=b_params['intervention_range']
                 )
-                b_metrics = evaluate_loader(model, b_loader, device, description=level_name)
+                b_metrics = evaluate_loader(model, b_loader, device, description=level_name if is_master else "")
                 benchmark_maes.append(b_metrics['mae'])
                 print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
             print("-----------------------------------")
