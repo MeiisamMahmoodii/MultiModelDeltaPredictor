@@ -91,6 +91,99 @@ class VectorizedDeepExpert(nn.Module):
         # Final: (Tokens, Experts, d_model) @ (Experts, d_model, 1) -> (Tokens, Experts, 1)
         return torch.einsum('ted, edc -> tec', x, self.final_proj).squeeze(-1) # (Tokens, Experts)
 
+class SimpleMoELayer(nn.Module):
+    """
+    Simple, reliable Mixture of Experts layer.
+    Each expert is a 2-layer MLP. Router uses Gumbel-Softmax for discrete routing.
+    """
+    def __init__(self, d_model, num_experts=8, expansion_factor=4):
+        super().__init__()
+        self.num_experts = num_experts
+        
+        # Router: (d_model) -> (num_experts)
+        self.router = nn.Linear(d_model, num_experts)
+        
+        # Experts: each is a simple FFN
+        dim_hidden = int(d_model * expansion_factor)
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, dim_hidden),
+                nn.GELU(),
+                nn.Linear(dim_hidden, d_model)
+            )
+            for _ in range(num_experts)
+        ])
+        
+        # Usage tracking
+        self.register_buffer('expert_counts', torch.zeros(num_experts))
+        self.register_buffer('total_tokens', torch.tensor(0.0))
+        
+    def forward(self, x):
+        """
+        x: (B, N, d_model)
+        Returns: (B, N, d_model), aux_loss
+        """
+        B, N, d_model = x.shape
+        x_flat = x.view(-1, d_model)  # (B*N, d_model)
+        
+        # Route tokens to experts
+        logits = self.router(x_flat)  # (B*N, num_experts)
+        weights = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1)  # (B*N, num_experts)
+        
+        # Compute load balancing loss
+        probs = F.softmax(logits, dim=-1)
+        importance = probs.mean(dim=0)  # (num_experts,)
+        target = 1.0 / self.num_experts
+        aux_loss = torch.mean((importance - target) ** 2)
+        
+        # Track usage
+        if self.training:
+            with torch.no_grad():
+                usage = weights.sum(dim=0)
+                self.expert_counts += usage
+                self.total_tokens += x_flat.size(0)
+        
+        # Route through experts
+        expert_outputs = []
+        for i, expert in enumerate(self.experts):
+            expert_outputs.append(expert(x_flat))  # (B*N, d_model)
+        
+        # Stack: (num_experts, B*N, d_model)
+        expert_outputs = torch.stack(expert_outputs, dim=0)
+        
+        # Select outputs via routing weights
+        # weights: (B*N, num_experts) -> transpose to (num_experts, B*N)
+        # expert_outputs: (num_experts, B*N, d_model)
+        weights_t = weights.t()  # (num_experts, B*N)
+        
+        # Weighted sum: sum over experts dimension
+        # (num_experts, B*N, 1) * (num_experts, B*N, d_model) -> (B*N, d_model)
+        output = torch.einsum('ej,ejd->jd', weights_t, expert_outputs)
+        
+        return output.view(B, N, d_model), aux_loss
+    
+    def reset_metrics(self):
+        self.expert_counts.zero_()
+        self.total_tokens.zero_()
+    
+    def get_expert_metrics(self):
+        counts = self.expert_counts.float()
+        total = self.total_tokens.item()
+        if total == 0:
+            return {"entropy": 0.0, "gini": 0.0, "counts": [0.0] * self.num_experts}
+        
+        probs = counts / total
+        # Entropy
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10)).item()
+        # Gini
+        sorted_probs = torch.sort(probs)[0]
+        n = len(sorted_probs)
+        gini = (2.0 * torch.sum((n + 1 - torch.arange(1, n+1).to(probs.device)) * sorted_probs) / (n * torch.sum(probs))) - (n + 1) / n
+        gini = gini.item()
+        
+        return {"entropy": entropy, "gini": gini, "counts": counts.cpu().numpy().tolist()}
+
+
 class MoELayer(nn.Module):
     """
     Vectorized Mixture of Experts Layer.
@@ -142,10 +235,20 @@ class MoELayer(nn.Module):
                 self.total_tokens += weights.size(0)
         
         # 2. Vectorized Execution
-        # We broadcast x to all experts: (Total, Experts, d_model)
+        # Broadcast x to all experts: (Total, Experts, d_model)
         x_expanded = x_flat.unsqueeze(1).expand(-1, self.num_experts, -1)
-        expert_outputs = self.experts(x_expanded) 
-        output = (expert_outputs * weights).sum(dim=1) 
+        expert_outputs = self.experts(x_expanded)  # (Total, Experts)
+        
+        # 3. Reconstruction: expert_outputs are scalars, weights are one-hot
+        # Approach: treat expert outputs as scaling factors for the input
+        # Scale input by expert logits and sum across experts
+        # weights shape: (Total, Experts), expert_outputs shape: (Total, Experts)
+        scaled = expert_outputs * weights  # (Total, Experts)
+        
+        # Aggregate: sum across experts and multiply with input
+        # This is a scaling + gating mechanism
+        scale = scaled.sum(dim=1, keepdim=True)  # (Total, 1)
+        output = x_flat * scale  # (Total, d_model)
         
         return output.view(batch_size, num_active), aux_loss
 
@@ -244,7 +347,7 @@ class RoPEAttentionLayer(nn.Module):
         # MoE replaces standard FFN
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=2, router_tau=router_tau)
+        self.moe = SimpleMoELayer(d_model, num_experts=num_experts, expansion_factor=4)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, rotary_emb=None, attn_mask=None):
