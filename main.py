@@ -97,7 +97,7 @@ def evaluate_loader(model, loader, device, description="Validating"):
     with torch.no_grad():
         # Setup Progress Bar
         progress_ctx = None
-        if RICH_AVAILABLE:
+        if RICH_AVAILABLE and description:
             from rich.progress import SpinnerColumn
             progress_ctx = Progress(
                 SpinnerColumn(),
