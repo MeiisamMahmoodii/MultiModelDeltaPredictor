@@ -110,7 +110,7 @@ graph TD
     end
 
     subgraph Encoder ["Interleaved Encoder"]
-        Mix["State Mixing"] -->|"X_eff = X_obs*(1-M) + X_inv*M"| Tokenizer["Tokenizer"]
+        Mix["State Mixing"] -->|""| Tokenizer["Tokenizer"]
         Tokenizer -->|"FeatID, Value, Type"| Emb["Embeddings"]
         Emb -->|"Interleave"| Tokens["Token Sequence (B, 2N, D)"]
     end

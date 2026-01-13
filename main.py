@@ -613,35 +613,6 @@ def main():
         if is_master:
             print(f"Val Level {curriculum.current_level} | MAE: {val_mae:.3f} | SHD: {val_metrics['shd']:.1f} | F1: {val_f1:.3f} | TPR: {val_metrics['tpr']:.2f} | FDR: {val_metrics['fdr']:.2f}")
             
-            # 2. Cross-Difficulty Benchmarks (Master Only)
-            # "Novel Solution: Cross-Difficulty Validation"
-            benchmarks = curriculum.get_benchmark_params()
-            benchmark_maes = []
-            print("--- Cross-Difficulty Benchmarks ---")
-            for level_name, b_params in benchmarks.items():
-                if is_master: print(f"  > Benchmarking {level_name.upper()} (Vars: {b_params['max_vars']})...", flush=True)
-                # Generate ephemeral loader for benchmark
-                # Use max density for robust testing
-                b_loader = get_validation_set(
-                    b_params['max_vars'],
-                    device,
-                    edge_prob=b_params['density_max'], 
-                    intervention_prob=args.intervention_prob,
-                    intervention_scale=b_params['intervention_range']
-                )
-                b_metrics = evaluate_loader(model, b_loader, device, description=level_name if is_master else "")
-                benchmark_maes.append(b_metrics['mae'])
-                print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
-            print("-----------------------------------")
-            
-            # Broadcast benchmark MAEs to all ranks? 
-            # Currently curriculum update is local per rank (seeded same), but benchmarks only run on Master.
-            # This logic (only running benchmarks on Master) means slaves won't get benchmark_maes.
-            # If we want slaves to respect this check, we must broadcast or run benchmarks on all.
-            # Running on all is safer for distributed consisteny.
-            # Let's run benchmarks on ALL RANKS.
-            # Wait, above block is inside `if is_master`.
-            # I must move it OUTSIDE `if is_master`.
             pass 
 
         # --- MOVED BENCHMARK LOGIC OUTSIDE is_master CHECK ---
