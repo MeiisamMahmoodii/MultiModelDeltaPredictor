@@ -473,11 +473,13 @@ def main():
                 # ASCII Header
                 print(f"Epoch {epoch} Started", flush=True)
 
-        # MOE METRICS RESET
+        # MOE METRICS RESET (now in each transformer layer)
         if hasattr(model, 'module'):
-            model.module.moe.reset_metrics()
+            for layer in model.module.transformer.layers:
+                layer.moe.reset_metrics()
         else:
-            model.moe.reset_metrics()
+            for layer in model.transformer.layers:
+                layer.moe.reset_metrics()
         
         i = 0 # Safety initialization
         
@@ -553,10 +555,24 @@ def main():
                 
             if is_master:
                 # Retrieve MoE Metrics (Handle DDP wrapper)
+                # Aggregate metrics across all transformer layers
+                total_entropy = 0.0
+                total_gini = 0.0
+                num_layers = 0
+                
                 if hasattr(model, 'module'):
-                    moe_metrics = model.module.moe.get_expert_metrics()
+                    layers = model.module.transformer.layers
                 else:
-                    moe_metrics = model.moe.get_expert_metrics()
+                    layers = model.transformer.layers
+                    
+                for layer in layers:
+                    metrics = layer.moe.get_expert_metrics()
+                    total_entropy += metrics['entropy']
+                    total_gini += metrics['gini']
+                    num_layers += 1
+                
+                avg_entropy = total_entropy / num_layers if num_layers > 0 else 0.0
+                avg_gini = total_gini / num_layers if num_layers > 0 else 0.0
                 
                 avg_loss = total_loss / (i + 1)
                 avg_shd = total_metrics['shd'] / (i + 1)
@@ -564,7 +580,7 @@ def main():
                 avg_mae = total_metrics['mae'] / (i + 1)
                 avg_delta = total_metrics['delta'] / (i + 1)
                 
-                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f} | Ent: {moe_metrics['entropy']:.2f} | Gini: {moe_metrics['gini']:.2f}"
+                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f} | Ent: {avg_entropy:.2f} | Gini: {avg_gini:.2f}"
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)

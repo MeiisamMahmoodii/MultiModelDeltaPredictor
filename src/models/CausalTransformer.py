@@ -215,9 +215,10 @@ class LearnedCausalMask(nn.Module):
 
 class RoPEAttentionLayer(nn.Module):
     """
-    Custom Transformer Layer with Rotary Positional Embeddings.
+    Custom Transformer Layer with Rotary Positional Embeddings and MoE.
+    MoE replaces the standard FFN for increased capacity and specialization.
     """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+    def __init__(self, d_model, nhead, num_experts=8, dropout=0.1, router_tau=1.0):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         # Implementation Note: PyTorch MHA doesn't easily expose Q/K for RoPE.
@@ -240,14 +241,10 @@ class RoPEAttentionLayer(nn.Module):
         self.w_v = nn.Linear(d_model, d_model)
         self.w_o = nn.Linear(d_model, d_model)
         
-        # Feed Forward
-        self.norm1 = nn.LayerNorm(d_model) # (Or RMSNorm if preferred)
+        # MoE replaces standard FFN
+        self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward),
-            nn.GELU(),
-            nn.Linear(dim_feedforward, d_model)
-        )
+        self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=2, router_tau=router_tau)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, rotary_emb=None, attn_mask=None):
@@ -278,29 +275,32 @@ class RoPEAttentionLayer(nn.Module):
         out = self.w_o(out)
         x = residual + self.dropout(out)
         
-        # Residual 2
+        # Residual 2: MoE (replaces FFN)
         residual = x
         x = self.norm2(x)
-        x = self.mlp(x)
-        x = residual + self.dropout(x)
+        x_moe, aux_loss = self.moe(x)
+        x = residual + self.dropout(x_moe)
         
-        return x
+        return x, aux_loss
 
 class RoPETransformer(nn.Module):
     """
-    Stack of RoPE Layers. Replacement for nn.TransformerEncoder.
+    Stack of RoPE Layers with MoE in each layer.
     """
-    def __init__(self, d_model, nhead, num_layers, max_len=2048):
+    def __init__(self, d_model, nhead, num_layers, num_experts=8, max_len=2048, router_tau=1.0):
         super().__init__()
         self.layers = nn.ModuleList([
-            RoPEAttentionLayer(d_model, nhead) for _ in range(num_layers)
+            RoPEAttentionLayer(d_model, nhead, num_experts=num_experts, router_tau=router_tau) 
+            for _ in range(num_layers)
         ])
         self.rope = RotaryEmbedding(d_model // nhead, max_position_embeddings=max_len)
         
     def forward(self, x, attn_mask=None):
+        total_aux = 0.0
         for layer in self.layers:
-            x = layer(x, self.rope, attn_mask=attn_mask)
-        return x
+            x, aux_loss = layer(x, self.rope, attn_mask=attn_mask)
+            total_aux += aux_loss
+        return x, total_aux
 
 class CausalTransformer(nn.Module):
     """
@@ -348,23 +348,23 @@ class CausalTransformer(nn.Module):
         mode = 'additive' if ablation_no_interleaved else 'interleaved'
         self.encoder = InterleavedEncoder(num_nodes, d_model, mode=mode)
         
-        # 2. RoPE Backbone (Replaces standard TransformerEncoder)
+        # 2. RoPE Backbone with MoE in each layer
         # If additive (no interleaved), seq_len is N (plus margin).
-        # If interleaved, seq_len is 2N.
         # If interleaved, seq_len is 2N.
         factor = 1 if ablation_no_interleaved else 2
         # ISSUE 16: Position Embedding Size Mismatch
         # Graphs can vary or exceed initial estimate. Use large safety buffer (4096).
         # RoPE adjusts dynamically, but large init prevents reallocation jitter.
-        self.transformer = RoPETransformer(d_model, nhead, num_layers, max_len=4096)
+        num_experts = 1 if ablation_dense else 8
+        self.transformer = RoPETransformer(
+            d_model, nhead, num_layers, 
+            num_experts=num_experts, 
+            max_len=4096, 
+            router_tau=router_tau
+        )
         
-        # 3. Universal MoE Layer (Hard Gumbel)
-        # Ablation: Dense = 1 Expert (Trivial Routing)
-        num_experts = 1 if ablation_dense else 8
-        # 3. Universal MoE Layer (Hard Gumbel)
-        # Ablation: Dense = 1 Expert (Trivial Routing)
-        num_experts = 1 if ablation_dense else 8
-        self.moe = MoELayer(d_model, num_experts=num_experts, num_layers_per_expert=4, router_tau=router_tau)
+        # 3. Physics Head: Simple projection from token embeddings to delta predictions
+        self.physics_head = nn.Linear(d_model, 1)
         
         # 4. Learned Causal Mask (Phase 3 Hotfix: Topology-Aware Attention)
         # "Novel Solution: Learned Causal Masking"
@@ -490,7 +490,7 @@ class CausalTransformer(nn.Module):
             
         # Shared Forward Logic
         x = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
-        x = self.transformer(x, attn_mask=attn_mask)
+        x, aux_loss = self.transformer(x, attn_mask=attn_mask)
         
         # Extract Value Tokens (embedding of the variable values)
         if self.ablation_no_interleaved:
@@ -500,14 +500,12 @@ class CausalTransformer(nn.Module):
             # Mode 'interleaved': [ID, Value, ID, Value...]
             value_tokens = x[:, 1::2, :]   # (B, N, D)
             
-        # Physics Head (MoE)
-        aux_loss = 0.0
+        # Physics Head: Simple projection
         if self.ablation_no_physics:
              # Return zeros
-             # deltas shape: (B, N)
              deltas = torch.zeros(value_tokens.shape[0], value_tokens.shape[1], device=value_tokens.device)
         else:
-             deltas, aux_loss = self.moe(value_tokens)
+             deltas = self.physics_head(value_tokens).squeeze(-1)  # (B, N, D) -> (B, N)
         
 
             
