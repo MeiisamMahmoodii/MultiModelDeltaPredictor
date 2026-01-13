@@ -40,7 +40,7 @@ def test_transformer_forward_pass_shapes():
     target_row = torch.zeros(batch_size, num_nodes) # Fake target
     int_mask = torch.zeros(batch_size, num_nodes) # Fake mask
     
-    deltas, logits, adj, mcm = model(base_samples, int_samples, target_row, int_mask)
+    deltas, logits, adj, mcm, _ = model(base_samples, int_samples, target_row, int_mask)
     
     assert deltas.shape == (batch_size, num_nodes)
     assert logits.shape == (batch_size, num_nodes, num_nodes)

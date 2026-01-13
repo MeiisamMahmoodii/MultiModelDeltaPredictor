@@ -77,7 +77,7 @@ def evaluate_graph(model, generator: SCMGenerator, num_nodes: int, batch_size: i
 
         start = time.time()
         with torch.no_grad():
-            deltas_pred, logits, _, _ = model(base_tensor, int_samples, target_row, mask, int_idx)
+            deltas_pred, logits, _, _, _ = model(base_tensor, int_samples, target_row, mask)
         runtime = time.time() - start
 
         true_delta = int_samples - base_tensor

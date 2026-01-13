@@ -54,7 +54,8 @@ def deep_smoke_test():
     # Enable anomaly detection for stability check
     torch.autograd.set_detect_anomaly(True)
     
-    deltas, logits, adj, mcm_out = model(base, int_s, target, mask)
+    # Returns 5 values
+    deltas, logits, adj, mcm_out, _ = model(base, int_s, target, mask)
     
     print(f"Output Shapes:")
     print(f"  Deltas: {deltas.shape} (Expected: B, N)")
@@ -68,7 +69,7 @@ def deep_smoke_test():
     mcm_mask = torch.zeros_like(mask)
     mcm_mask[:, 0] = 1.0 # Mask var 0
     
-    d_mcm, l_mcm, a_mcm, out_mcm = model(base, int_s, target, mask, mcm_mask=mcm_mask)
+    d_mcm, l_mcm, a_mcm, out_mcm, _ = model(base, int_s, target, mask, mcm_mask=mcm_mask)
     print(f"  MCM Out: {out_mcm.shape} (Expected: B, N)")
     
     # 5. Loss & Backward (Gradient Check)

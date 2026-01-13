@@ -118,7 +118,8 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 idx = batch['int_node_idx'].to(device)
                 
                 # Forward
-                deltas, logits, adj, _, _ = model(base, int_s, target, mask, idx)
+                # Forward
+                deltas, logits, adj, _, _ = model(base, int_s, target, mask)
                 
                 # Compute Loss (Standard validation loss)
                 # Note: We rely on causal_loss_fn components or just report MAE/BCE separately.
@@ -181,14 +182,14 @@ def main():
     parser.add_argument("--reuse_factor", type=int, default=1, help="Reuse each generated graph N times")
     parser.add_argument("--checkpoint_path", type=str, default="last_checkpoint.pt", help="Path to checkpoint")
     parser.add_argument("--grad_checkpoint", action="store_true", help="Enable gradient checkpointing (Saves Memory)")
-    parser.add_argument("--lambda_dag", type=float, default=0.0, help="Weight for DAG structural loss")
+    parser.add_argument("--lambda_dag", type=float, default=10.0, help="Weight for DAG structural loss")
 
     parser.add_argument("--lambda_h", type=float, default=0.0, help="Weight for Acyclicity loss")
     parser.add_argument("--lambda_sparse", type=float, default=0.0, help="Weight for Sparsity (L1) loss")
     parser.add_argument("--lambda_aux_moe", type=float, default=0.1, help="Auxiliary load-balancing loss weight for MoE")
     parser.add_argument("--router_tau", type=float, default=1.0, help="Gumbel-Softmax temperature for MoE router")
     parser.add_argument("--lambda_delta", type=float, default=100.0, help="Weight for Delta Prediction Loss")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient Clipping Max Norm")
+    parser.add_argument("--grad_clip", type=float, default=10.0, help="Gradient Clipping Max Norm") # Bumped to 10.0
     parser.add_argument("--loss_type", type=str, default="bce", choices=["bce", "focal"], help="DAG Loss Type")
     
     # Ablation Flags
@@ -262,21 +263,25 @@ def main():
     # We should refactor it slightly to accept the curriculum manager or run the loop here.
     # For V1 Unification, let's run a simple loop here.
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # ISSUE 1: AdamW needs weight_decay for structural sparsity
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     
-    # Scheduler: Linear Warmup (5 epochs) + Cosine Annealing with Warm Restarts
-    # Restart every 50 epochs, doubling the period each time (T_mult=2)
-    scheduler_warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=5)
+    # Scheduler: Linear Warmup + Cosine Annealing (Per Step)
+    # 5 Epochs Warmup * 2000 steps = 10,000 steps
+    # 50 Epochs Restart * 2000 steps = 100,000 steps
+    steps_per_epoch_est = 2000
+    scheduler_warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=5 * steps_per_epoch_est)
     scheduler_main = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=50, T_mult=2, eta_min=1e-8
+        optimizer, T_0=50 * steps_per_epoch_est, T_mult=2, eta_min=1e-8
     )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_main], milestones=[5])
+    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_main], milestones=[5 * steps_per_epoch_est])
     
     start_epoch = 0
     
     # Validation Loader (Dynamic)
     val_loader = None
-    current_val_vars = -1
+    val_loader = None
+    current_val_vars = (-1, -1.0) # (max_vars, edge_prob)
     
     start_epoch = 0
     
@@ -325,8 +330,12 @@ def main():
             if is_master:
                 print(f"Warning: Could not load optimizer state (New Parameters Added?): {e}")
                 print("Starting with FRESH Optimizer for this Phase.")
+        except Exception as e:
+            if is_master:
+                print(f"Warning: Could not load optimizer state (New Parameters Added?): {e}")
+                print("Starting with FRESH Optimizer for this Phase.")
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
-        curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
+        # ISSUE 19: Duplicate Curriculum Load Removed
         
         # HOTFIX: Reset Router to break expert collapse from previous phase
         if is_master:
@@ -338,34 +347,61 @@ def main():
             else:
                 router = model.moe.router
             
-            router.weight.normal_(0, 0.02)
-            router.bias.zero_()
+        # ISSUE 4: Always Initialize Router if not resuming (or even if resuming, to break collapse?)
+        # User requested: "Re-Initialized on Training Start"
+        # If resuming, we might want to respect checkoint OR reset if collapse is suspected.
+        # But for FRESH training, we MUST init.
+        # The current code only does it inside `if args.resume`.
+        # We move it OUTSIDE, but only if NOT resuming (or explicit reset).
+        # Actually, let's duplicate the logic: if fresh start -> Init. If resume -> User said "Re-initializing... to break collapse", so we keep it there too.
             
-        start_epoch = checkpoint['epoch'] + 1
-        if is_master:
-            print(f"Resumed at Epoch {start_epoch} | Level {curriculum.current_level}")
-    
+    # Always ensure Router is initialized properly at start (Fresh)
+    # Broadcast weights from Rank 0 to ensure consistency in DDP (since RNG is seeded differently per rank)
+    if not args.resume:
+        if is_master: print("Initializing MoE Router (Fresh Start)...")
+        with torch.no_grad():
+             if hasattr(model, 'module'):
+                 router = model.module.moe.router
+             else:
+                 router = model.moe.router
+             
+             if is_master:
+                 router.weight.normal_(0, 0.02)
+                 router.bias.zero_()
+        
+        # ISSUE 10: Broadcast to sync initialization across ranks
+        if dist.is_initialized():
+            if hasattr(model, 'module'):
+                 router = model.module.moe.router
+            else:
+                 router = model.moe.router
+            dist.broadcast(router.weight, src=0)
+            dist.broadcast(router.bias, src=0)
+
     for epoch in range(start_epoch, args.epochs):
         # Update Curriculum Stats
         params = curriculum.get_current_params()
         
         # Check if we need to regenerate validation set (Level Changed or First Run)
-        if params['max_vars'] != current_val_vars:
+        # Check if we need to regenerate validation set (Level Changed or First Run)
+        # ISSUE 6: Check density changes too
+        curr_edge_prob = args.edge_prob if args.edge_prob is not None else params['density_max']
+        
+        # State key for validation cache
+        val_state_key = (params['max_vars'], curr_edge_prob)
+        
+        if val_state_key != current_val_vars:
             if is_master: 
-                print(f"Generating new Validation Set for {params['max_vars']} vars...")
-            # We generate Val Set on all ranks to avoid broadcasting complexity for now 
-            # (RNG seeded by local_rank, so each rank validates on its own slice)
-            # Use current density (or fixed edge_prob) 
-            # Match Training Intervention Probability
-            curr_edge_prob = args.edge_prob if args.edge_prob is not None else params['density_max']
+                print(f"Generating new Validation Set for {params['max_vars']} vars, density {curr_edge_prob:.2f}...")
+            
             val_loader = get_validation_set(
                 params['max_vars'], 
                 device, 
                 edge_prob=curr_edge_prob,
-                intervention_prob=args.intervention_prob, # FIXED: Match training difficulty
+                intervention_prob=args.intervention_prob, 
                 intervention_scale=params['intervention_range']
             )
-            current_val_vars = params['max_vars']
+            current_val_vars = val_state_key
             
         if is_master:
             print(f"Epoch {epoch} | Level {curriculum.current_level} | Vars {params['max_vars']}")
@@ -453,7 +489,7 @@ def main():
             mask = batch['int_mask'].to(device)
             idx = batch['int_node_idx'].to(device)
             # Forward (Phase 4: Returns deltas, logits, adj, mcm_out, aux_loss)
-            deltas, logits, adj, _, aux_loss = model(base, int_s, target, mask, idx)
+            deltas, logits, adj, _, aux_loss = model(base, int_s, target, mask)
             
             # Adaptive Weighting (User Request: Curriculum-linked)
             # Level 0 -> lambda_delta=100. Level 30 -> lambda_delta=1.
@@ -483,12 +519,18 @@ def main():
 
             # Final loss safety guard
             if torch.isnan(loss) or torch.isinf(loss):
-                loss = torch.tensor(1.0, device=loss.device)
+                # ISSUE 12: Maintain gradients even on replacement (Scale 0.0 + dummy) or 1.0 w/ grad?
+                # If we return a constant 1.0 with requires_grad=True, the gradient is 0.0.
+                # However, this effectively "skips" the batch safely without crashing or breaking the graph.
+                loss = torch.tensor(1.0, device=loss.device, requires_grad=True)
             
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip) # Configurable Gradient Clipping
             optimizer.step()
+            
+            # ISSUE 7: Scheduler Step per Batch
+            scheduler.step()
             
             # Additional Metrics
             with torch.no_grad():
@@ -585,7 +627,8 @@ def main():
         val_fdr = val_metrics['fdr']
         
         # Step Scheduler (Cosine uses epoch, not val metric)
-        scheduler.step() # Update per epoch (SequentialLR doesn't support fractional epochs)
+        # Scheduler Step per Batch now
+        # scheduler.step()
         
         # Calculate Epoch Metrics (Training Avg)
         i = max(1, i) # Avoid div by zero if loop didn't run
@@ -594,16 +637,14 @@ def main():
         avg_shd = total_metrics['shd'] / (max(1, i+1)) 
         
         # 1. Update Curriculum (using VALIDATION Scores)
-        # We need benchmark_maes here.
-        # Since I haven't implemented broadcast, I will disable the check for non-master nodes temporarily
-        # OR simply run benchmarks on all nodes?
-        # Running on all nodes is expensive but correct.
-        # BUT `evaluate_loader` prints to stdout.
-        # Let's keep it simple: Only Master checks benchmarks for now?
-        # If Master decides NOT to level up, slaves might level up? DESYNC!
-        # CRITICAL: Curriculum state must be synced across ranks.
-        # `curriculum.update` updates internal state.
-        # If Master updates differently than Slaves, DDP breaks (different data gen parameters next epoch).
+        # ISSUE 11: Sync Metrics across ranks to prevent Curriculum divergence
+        if dist.is_initialized():
+             # Stack metrics [mae, f1]
+             local_metrics = torch.tensor([val_mae, val_f1], device=device)
+             dist.all_reduce(local_metrics, op=dist.ReduceOp.SUM) # Sum across ranks
+             local_metrics /= dist.get_world_size() # Average
+             val_mae = local_metrics[0].item()
+             val_f1 = local_metrics[1].item()
         
         # FIX: Run benchmarks on ALL RANKS (silently for slaves).
         
@@ -621,9 +662,17 @@ def main():
                 intervention_scale=b_params['intervention_range']
             )
             b_metrics = evaluate_loader(model, b_loader, device, description=level_name if is_master else "")
-            benchmark_maes.append(b_metrics['mae'])
+            
+            # Sync Benchmark MAE too
+            b_mae = torch.tensor(b_metrics['mae'], device=device)
+            if dist.is_initialized():
+                 dist.all_reduce(b_mae, op=dist.ReduceOp.SUM)
+                 b_mae /= dist.get_world_size()
+            
+            benchmark_maes.append(b_mae.item())
+            
             if is_master:
-                print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
+                print(f"[{level_name.upper()}] MAE: {b_mae.item():.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
 
         leveled_up, reset_lr = curriculum.update(val_mae, val_f1, benchmark_maes)
         

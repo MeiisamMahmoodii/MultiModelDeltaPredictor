@@ -63,7 +63,7 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
     
     # Phase 5: Unified Learning (Structure Enabled)
     # 1. DAG Construction Loss
-    loss_dag = torch.tensor(0.0, device=pred_adj.device)
+    loss_dag = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     
     if loss_type == 'focal':
         # Focal Loss (Better for sparse graphs, focuses on hard examples)
@@ -75,8 +75,15 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
         num_pos = true_adj.sum()
         num_total = true_adj.numel()
         num_neg = num_total - num_pos
-        pos_weight = num_neg / (num_pos + 1e-6)
-        pos_weight = torch.clamp(pos_weight, min=1.0, max=20.0)
+        
+        # ISSUE 17: Pos_weight Edge Cases (num_pos=0)
+        if num_pos == 0:
+            pos_weight = torch.tensor(1.0, device=pred_adj.device, dtype=pred_adj.dtype)
+        else:
+            pos_weight = num_neg / (num_pos + 1e-6)
+            # ISSUE 5: Clamping to 20.0 was too restrictive for sparse graphs (e.g. 50 nodes, 1% density -> 100x ratio)
+            # Relaxed constraint to [1.0, 100.0]
+            pos_weight = torch.clamp(pos_weight, min=1.0, max=100.0)
         
         loss_dag = nn.functional.binary_cross_entropy_with_logits(
             pred_adj, 
@@ -94,6 +101,7 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
     # Here we use sigmoid(logits).
     adj_prob = torch.sigmoid(pred_adj)
     
+    # ISSUE 20: Device Mismatch / Dtype safety
     loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_h > 0:
         # Exact Per-Sample H-Loss (No consensus bias)

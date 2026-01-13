@@ -99,37 +99,59 @@ class InterleavedEncoder(nn.Module):
     def forward(self, base_samples, int_samples, target_row, int_mask):
         """
         Args:
-            target_row: (B, N) - The sample we are processing (or Zero if Masked)
-            int_mask: (B, N) - 0=Obs, 1=Int, 2=Masked (If passing combined mask)
-        Returns:
-            tokens: (B, 2N, D)
+            base_samples: (B, N) - Current State (Refined in passes 2/3)
+            int_samples: (B, N) - Intervention Values (Ground Truth for Intervened Node)
+            target_row: (B, N) - Original Base (Unused if we use base_samples properly)
+            int_mask: (B, N) - 1.0 if Intervened.
         """
-        B, N = target_row.shape
-        device = target_row.device
+        B, N = base_samples.shape
+        device = base_samples.device
+        
+        # ISSUE 14: Model was ignoring input context and recurrence!
+        # OLD: values = target_row.unsqueeze(-1)
+        # NEW: Construct Effective Input State
+        # For non-intervened nodes: Use base_samples (Current State)
+        # For intervened nodes: Use int_samples (Forced Value)
+        
+        # Mix: val = base * (1 - mask) + int * mask
+        # Note: int_mask might be boolean or float. Assume Float.
+        mask = int_mask.unsqueeze(-1) # (B, N, 1)
+        
+        # Ensure shapes match
+        if len(base_samples.shape) == 3:
+             # If base_samples has context dim (B, Context, N), we flatten or take last?
+             # CausalTransformer passes sequence? No, CausalTransformer passes (B, N).
+             # Wait, CausalTransformer pass 2: refined_base might implement context later.
+             # Current implementation: refined_base is (B, N).
+             pass
+             
+        val_base = base_samples.unsqueeze(-1)
+        val_int = int_samples.unsqueeze(-1)
+        
+        # Effective Values
+        # Note: int_samples contains the target value for the intervened node.
+        # base_samples contains the current belief of the state.
+        # The tokens should represent the *State* we are querying about.
+        # But for the Intervened Node, the value is FIXED by intervention.
+        values = val_base * (1.0 - mask) + val_int * mask
         
         # 1. Feature Tokens
-        # Create IDs: [0, 1, ..., N-1] repeated B times
         ids = torch.arange(N, device=device).unsqueeze(0).repeat(B, 1) # (B, N)
         f_emb = self.var_id_emb(ids) # (B, N, D)
         
         # 2. Value Tokens
-        # Embed the scalar values
-        values = target_row.unsqueeze(-1) # (B, N, 1)
         v_emb = self.value_emb(values) # (B, N, D)
         
-        # Add Type Information to Value Tokens
-        # If int_mask=1, we add 'Intervention' embedding
+        # Add Type Information
         t_ids = int_mask.long() # (B, N)
         t_emb = self.type_emb(t_ids) # (B, N, D)
         v_emb = v_emb + t_emb
         
         # 3. Combine
         if self.mode == 'interleaved':
-            # Interleave: Stack (B, N, 2, D) -> Flatten (B, 2N, D)
             stacked = torch.stack([f_emb, v_emb], dim=2)
             tokens = stacked.flatten(1, 2)
         else:
-            # Additive (Standard): Sum all embeddings -> (B, N, D)
-            tokens = f_emb + v_emb # v_emb already includes type info from above
+            tokens = f_emb + v_emb
             
         return tokens

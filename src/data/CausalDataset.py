@@ -100,7 +100,9 @@ class CausalDataset(IterableDataset):
                 all_int_tensors.append(int_tensor)
                 all_masks.append(int_mask.unsqueeze(0).expand(int_tensor.shape[0], -1)) # Expand mask
                 all_indices.append(int_node_idx.unsqueeze(0).expand(int_tensor.shape[0])) # Expand idx
-                all_targets.append(target_block)
+                # ISSUE 18: Tensor Reference Aliasing
+                # base_tensor is reused. If modified, history corrupted. Clone it.
+                all_targets.append(target_block.clone())
                 all_deltas.append(delta_block)
             
             # Stack everything for this graph

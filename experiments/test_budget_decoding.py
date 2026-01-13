@@ -69,7 +69,7 @@ def run_budgeted_decoding(checkpoint_path, N=20):
         int_idx = torch.argmax(int_mask_t, dim=1)[:slice_size]
         
         with torch.no_grad():
-            _, logits, _, _ = model(base_samples, int_samples, target_row, int_mask_t, int_idx)
+            _, logits, _, _, _ = model(base_samples, int_samples, target_row, int_mask_t)
             avg_logits = logits.mean(dim=0) # (N, N)
             
         # 1. Baseline: Fixed Threshold (1.33)

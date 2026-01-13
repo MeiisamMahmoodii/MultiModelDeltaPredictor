@@ -83,7 +83,7 @@ def test_forward_pass(batch):
     
     print("Running forward pass...")
     try:
-        deltas, logits, adj = model(base, int_s, target, mask, idx)
+        deltas, logits, adj, _, _ = model(base, int_s, target, mask)
         print(f"Output Shapes - Delta: {deltas.shape}, Logits: {logits.shape}, Adj: {adj.shape}")
         print("✅ Forward Pass Passed")
     except Exception as e:

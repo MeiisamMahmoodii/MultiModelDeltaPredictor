@@ -127,7 +127,8 @@ def evaluate_model(checkpoint_path, batch_size=32, num_graphs=8, samples_per_gra
             true_adj = batch['adj'].to(device)
             
             # --- 1. Model ---
-            deltas, logits, _, _ = model(base, int_s, target, mask, idx)
+            # Unpack 5 values
+            deltas, logits, _, _, _ = model(base, int_s, target, mask)
             
             # Metrics
             mae = compute_mae(deltas, true_delta)

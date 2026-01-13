@@ -351,8 +351,12 @@ class CausalTransformer(nn.Module):
         # 2. RoPE Backbone (Replaces standard TransformerEncoder)
         # If additive (no interleaved), seq_len is N (plus margin).
         # If interleaved, seq_len is 2N.
+        # If interleaved, seq_len is 2N.
         factor = 1 if ablation_no_interleaved else 2
-        self.transformer = RoPETransformer(d_model, nhead, num_layers, max_len=num_nodes*factor + 10)
+        # ISSUE 16: Position Embedding Size Mismatch
+        # Graphs can vary or exceed initial estimate. Use large safety buffer (4096).
+        # RoPE adjusts dynamically, but large init prevents reallocation jitter.
+        self.transformer = RoPETransformer(d_model, nhead, num_layers, max_len=4096)
         
         # 3. Universal MoE Layer (Hard Gumbel)
         # Ablation: Dense = 1 Expert (Trivial Routing)
@@ -379,7 +383,7 @@ class CausalTransformer(nn.Module):
         self.dag_key = nn.Linear(d_model, d_model)
         self.dag_scale = d_model ** -0.5
 
-    def forward(self, base_samples, int_samples, target_row, int_mask, int_node_idx=None, mcm_mask=None):
+    def forward(self, base_samples, int_samples, target_row, int_mask, mcm_mask=None):
         """
         Input:
             mcm_mask: (B, N) or None. If present, 1.0 means this token is masked.
@@ -460,7 +464,9 @@ class CausalTransformer(nn.Module):
         else:
             B, N = base_samples.shape
             
-        dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
+        # ISSUE 15: Return estimated adjacency instead of zeros
+        # This provides useful debug info and satisfies "Predicted Adjacency" expectation.
+        dummy_adj = torch.sigmoid(logits_final)
         
         # Total Aux Loss (Average or Sum?) - Sum encourages all steps to be balanced.
         total_aux = aux_1 + aux_2 + aux_3

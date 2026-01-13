@@ -200,15 +200,14 @@ def evaluate_baselines(checkpoint_path, num_graphs=3, test_vars=20):
         # target_row is (32, N).
         
         # We need to ensure shapes are correct.
-        # Model forward expects: (base, int, target, mask, idx)
+        # Model forward expects: (base, int, target, mask)
         
         with torch.no_grad():
-            _, logits, _, _ = model(
+            _, logits, _, _, _ = model(
                 base_samples,     # (32, N)
                 int_samples,      # (32, N)
                 target_row,       # (32, N)
-                int_mask_t,       # (32, N)
-                int_idx           # (32,)
+                int_mask_t        # (32, N)
             )
             # Logits: (32, N, N). Average them.
             avg_logits = logits.mean(dim=0)

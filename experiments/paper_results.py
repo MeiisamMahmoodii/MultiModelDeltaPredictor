@@ -103,11 +103,11 @@ class PaperExperiments:
             # mapping: old -> new. 
             # inverse perm: inv[old] = new
             inv_perm = torch.argsort(perm)
-            perm_idx = inv_perm[int_idx]
             
             with torch.no_grad():
-                _, logits, _, _ = self.model(
-                    perm_base, perm_int, perm_target, perm_mask, perm_idx
+                # Unpack 5 values
+                _, logits, _, _, _ = self.model(
+                    perm_base, perm_int, perm_target, perm_mask
                 )
                 
             # Logits are (B, N, N) in Permuted Order.

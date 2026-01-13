@@ -86,7 +86,8 @@ def run_inference(model, loader, device):
             true_delta = batch['delta'].to(device)
             
             # Forward
-            pred_delta, _, _, _ = model(base, int_s, target, mask, idx)
+            # Model returns 5 values now (deltas, logits, adj, mcm, aux)
+            pred_delta, _, _, _, _ = model(base, int_s, target, mask)
             
             all_preds.append(pred_delta.cpu().numpy())
             all_trues.append(true_delta.cpu().numpy())

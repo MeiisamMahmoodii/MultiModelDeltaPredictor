@@ -173,7 +173,8 @@ class ISDCPWrapper(ModelWrapper):
         int_idx = torch.tensor([intervention_idx], device=self.device)
         
         with torch.no_grad():
-            deltas_pred, logits, _, _ = self.model(base_tensor, int_samples, target_row, mask, int_idx)
+            # Unpack 5 values
+            deltas_pred, logits, _, _, _ = self.model(base_tensor, int_samples, target_row, mask)
             
         return deltas_pred.cpu().numpy(), {"logits": logits.cpu().numpy()}
 

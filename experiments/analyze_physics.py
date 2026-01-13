@@ -141,7 +141,8 @@ def analyze_physics(checkpoint_path, num_graphs=5, test_vars=20):
         idx_t = torch.argmax(mask_t, dim=1)
         
         with torch.no_grad():
-            deltas_pred, _, _, _ = model(base_t, int_t, target_row, mask_t, idx_t)
+            # Unpack 5 values
+            deltas_pred, _, _, _, _ = model(base_t, int_t, target_row, mask_t)
             # MAE
             mae_isd = mean_absolute_error(true_delta, deltas_pred.numpy())
             metrics["ISD-CP"].append(mae_isd)
