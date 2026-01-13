@@ -220,6 +220,14 @@ def main():
         # Create checkpoints directory
         os.makedirs("checkpoints", exist_ok=True)
 
+    # Batch Size Warning
+    # CausalDataset yields chunks of ~64-100 samples per item (Graph).
+    # So batch_size=64 means 64 * 100 = 6400 samples!
+    if args.batch_size > 4:
+        print(f"\n[WARNING] Batch Size {args.batch_size} implies {args.batch_size} * GRAPHS per step.", flush=True)
+        print(f"          Since each graph contains ~100 samples, this is {args.batch_size * 100} samples per batch!", flush=True)
+        print(f"          If you encounter OOM, reduce --batch_size to 1, 2, or 4.\n", flush=True)
+
     # 1. Model
     # Max vars + buffer for embeddings
     # Increased d_model to 512 for Phase 3 "Physics-Native" Capacity
