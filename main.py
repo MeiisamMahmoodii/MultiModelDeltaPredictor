@@ -78,7 +78,7 @@ def get_validation_set(num_vars, device, edge_prob=0.2, intervention_prob=0.5, i
         intervention_prob=intervention_prob,
         intervention_scale_range=(intervention_scale, intervention_scale) # Fixed scale
     )
-    return DataLoader(dataset, batch_size=32, collate_fn=collate_fn_pad)
+    return DataLoader(dataset, batch_size=4, collate_fn=collate_fn_pad)
 
 def evaluate_loader(model, loader, device, description="Validating"):
     """
@@ -86,9 +86,10 @@ def evaluate_loader(model, loader, device, description="Validating"):
     Returns a dictionary of aggregated metrics.
     """
     model.eval()
-    total_metrics = {
-        'mae': 0.0, 'f1': 0.0, 'shd': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'n_batches': 0
-    }
+    total_loss = 0.0
+    total_mae = 0.0
+    all_logits = []
+    all_adj = []
     
     with torch.no_grad():
         # Setup Progress Bar
@@ -104,8 +105,8 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 transient=True
             )
             progress_ctx.start()
-            task_id = progress_ctx.add_task(description, total=None) # Unknown length for iterable dataset
-        
+            task_id = progress_ctx.add_task(description, total=None) 
+            
         try:
             for i, batch in enumerate(loader):
                 if progress_ctx: progress_ctx.update(task_id, advance=1, description=f"{description} (Batch {i+1})")
@@ -119,31 +120,56 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 # Forward
                 deltas, logits, adj, _, _ = model(base, int_s, target, mask, idx)
                 
-                # Metrics
-                total_metrics['mae'] += compute_mae(deltas, batch['delta'].to(device))
-                total_metrics['f1'] += compute_f1(logits, batch['adj'].to(device))
-                total_metrics['shd'] += compute_shd(logits, batch['adj'].to(device))
-                tpr, fdr = compute_tpr_fdr(logits, batch['adj'].to(device))
-                total_metrics['tpr'] += tpr
-                total_metrics['fdr'] += fdr
-                total_metrics['n_batches'] += 1
+                # Compute Loss (Standard validation loss)
+                # Note: We rely on causal_loss_fn components or just report MAE/BCE separately.
+                # Here we just track MAE and custom structure metrics.
+                total_mae += compute_mae(deltas, batch['delta'].to(device))
+                
+                # Collect Structure Predictions (CPU to save GPU memory)
+                all_logits.append(logits.cpu())
+                all_adj.append(batch['adj'].cpu())
+                
         finally:
             if progress_ctx: progress_ctx.stop()
             
-    # Average
-    n = max(1, total_metrics['n_batches'])
+    # Aggregate results
+    if len(all_logits) == 0:
+        return {'mae': 0.0, 'f1': 0.0, 'shd': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'loss': 0.0}
+
+    # Concatenate all logits/adj
+    all_logits = torch.cat(all_logits, dim=0)
+    all_adj = torch.cat(all_adj, dim=0)
+    
+    avg_mae = total_mae / len(loader) if len(loader) > 0 else 0.0
+    
+    # 1. Standard Metrics (Threshold 0.0 -> Prob 0.5)
+    f1_std = compute_f1(all_logits, all_adj, threshold=0.0)
+    shd_std = compute_shd(all_logits, all_adj, threshold=0.0)
+    tpr, fdr = compute_tpr_fdr(all_logits, all_adj, threshold=0.0)
+
+    # 2. Optimal Threshold Search (Calibrated capability)
+    from src.training.metrics import find_optimal_threshold
+    best_thresh, best_f1, best_shd_opt = find_optimal_threshold(all_logits, all_adj)
+    
+    # Logging
+    if description:
+        print(f"[{description}] MAE: {avg_mae:.4f} | F1 (0.0): {f1_std:.3f} | Best F1: {best_f1:.3f} (@{best_thresh}) | SHD (Opt): {best_shd_opt:.1f}")
+
     return {
-        'mae': total_metrics['mae'] / n,
-        'f1': total_metrics['f1'] / n,
-        'shd': total_metrics['shd'] / n,
-        'tpr': total_metrics['tpr'] / n,
-        'fdr': total_metrics['fdr'] / n
+        'mae': avg_mae,
+        'f1': best_f1,       # Report BEST F1 for curriculum
+        'shd': best_shd_opt, # Report BEST SHD for curriculum
+        'tpr': tpr,
+        'fdr': fdr,
+        'best_thresh': best_thresh,
+        'f1_std': f1_std,
+        'shd_std': shd_std
     }
 
 def main():
     parser = argparse.ArgumentParser(description="ISD-CP Unified Training")
     parser.add_argument("--epochs", type=int, default=1000)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (Number of Graphs). Effective samples = batch_size * 64.")
     parser.add_argument("--lr", type=float, default=2e-4) # INCREASED 100x (Wake Up)
     parser.add_argument("--min_vars", type=int, default=20)
     parser.add_argument("--max_vars", type=int, default=50)
@@ -161,6 +187,9 @@ def main():
     parser.add_argument("--lambda_sparse", type=float, default=0.0, help="Weight for Sparsity (L1) loss")
     parser.add_argument("--lambda_aux_moe", type=float, default=0.1, help="Auxiliary load-balancing loss weight for MoE")
     parser.add_argument("--router_tau", type=float, default=1.0, help="Gumbel-Softmax temperature for MoE router")
+    parser.add_argument("--lambda_delta", type=float, default=100.0, help="Weight for Delta Prediction Loss")
+    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient Clipping Max Norm")
+    parser.add_argument("--loss_type", type=str, default="bce", choices=["bce", "focal"], help="DAG Loss Type")
     
     # Ablation Flags
     parser.add_argument("--ablation_no_twin_world", action="store_true", help="Disable Twin World Variance Reduction")
@@ -397,6 +426,14 @@ def main():
             else:
                 # ASCII Header
                 print(f"Epoch {epoch} Started", flush=True)
+
+        # MOE METRICS RESET
+        if hasattr(model, 'module'):
+            model.module.moe.reset_metrics()
+        else:
+            model.moe.reset_metrics()
+        
+        i = 0 # Safety initialization
         
         for i, batch in enumerate(dataloader):
             if i >= steps_per_epoch: break
@@ -410,15 +447,21 @@ def main():
             # Forward (Phase 4: Returns deltas, logits, adj, mcm_out, aux_loss)
             deltas, logits, adj, _, aux_loss = model(base, int_s, target, mask, idx)
             
-            # Loss (Full Causal Loss: Delta + DAG + Acyclicity)
+            # Adaptive Weighting (User Request: Curriculum-linked)
+            # Level 0 -> lambda_delta=100. Level 30 -> lambda_delta=1.
+            # Formula: max(1.0, initial - 3.3 * level)
+            current_lambda_delta = max(1.0, args.lambda_delta - (3.3 * curriculum.current_level))
+            
             loss, items = causal_loss_fn(
                 deltas, 
                 batch['delta'].to(device), 
                 logits, 
                 batch['adj'].to(device),
+                lambda_delta=current_lambda_delta,
                 lambda_dag=args.lambda_dag,
                 lambda_h=args.lambda_h,
-                lambda_l1=args.lambda_sparse
+                lambda_l1=args.lambda_sparse,
+                loss_type=args.loss_type
             ) 
             
             # Add Load Balancing Loss with NaN/Inf guard
@@ -436,7 +479,7 @@ def main():
             
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1) # Logic fix for instability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip) # Configurable Gradient Clipping
             optimizer.step()
             
             # Additional Metrics
@@ -501,6 +544,7 @@ def main():
             # 2. Cross-Difficulty Benchmarks (Master Only)
             # "Novel Solution: Cross-Difficulty Validation"
             benchmarks = curriculum.get_benchmark_params()
+            benchmark_maes = []
             print("--- Cross-Difficulty Benchmarks ---")
             for level_name, b_params in benchmarks.items():
                 if is_master: print(f"  > Benchmarking {level_name.upper()} (Vars: {b_params['max_vars']})...", flush=True)
@@ -514,9 +558,21 @@ def main():
                     intervention_scale=b_params['intervention_range']
                 )
                 b_metrics = evaluate_loader(model, b_loader, device, description=level_name)
+                benchmark_maes.append(b_metrics['mae'])
                 print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
             print("-----------------------------------")
+            
+            # Broadcast benchmark MAEs to all ranks? 
+            # Currently curriculum update is local per rank (seeded same), but benchmarks only run on Master.
+            # This logic (only running benchmarks on Master) means slaves won't get benchmark_maes.
+            # If we want slaves to respect this check, we must broadcast or run benchmarks on all.
+            # Running on all is safer for distributed consisteny.
+            # Let's run benchmarks on ALL RANKS.
+            # Wait, above block is inside `if is_master`.
+            # I must move it OUTSIDE `if is_master`.
+            pass 
 
+        # --- MOVED BENCHMARK LOGIC OUTSIDE is_master CHECK ---
         val_tpr = val_metrics['tpr']
         val_fdr = val_metrics['fdr']
         
@@ -530,7 +586,38 @@ def main():
         avg_shd = total_metrics['shd'] / (max(1, i+1)) 
         
         # 1. Update Curriculum (using VALIDATION Scores)
-        leveled_up, reset_lr = curriculum.update(val_mae, val_f1)
+        # We need benchmark_maes here.
+        # Since I haven't implemented broadcast, I will disable the check for non-master nodes temporarily
+        # OR simply run benchmarks on all nodes?
+        # Running on all nodes is expensive but correct.
+        # BUT `evaluate_loader` prints to stdout.
+        # Let's keep it simple: Only Master checks benchmarks for now?
+        # If Master decides NOT to level up, slaves might level up? DESYNC!
+        # CRITICAL: Curriculum state must be synced across ranks.
+        # `curriculum.update` updates internal state.
+        # If Master updates differently than Slaves, DDP breaks (different data gen parameters next epoch).
+        
+        # FIX: Run benchmarks on ALL RANKS (silently for slaves).
+        
+        benchmarks = curriculum.get_benchmark_params()
+        benchmark_maes = []
+        # if is_master: print("--- Cross-Difficulty Benchmarks ---")
+        
+        for level_name, b_params in benchmarks.items():
+            # if is_master: print(f"  > Benchmarking {level_name.upper()} (Vars: {b_params['max_vars']})...", flush=True)
+            b_loader = get_validation_set(
+                b_params['max_vars'],
+                device,
+                edge_prob=b_params['density_max'], 
+                intervention_prob=args.intervention_prob,
+                intervention_scale=b_params['intervention_range']
+            )
+            b_metrics = evaluate_loader(model, b_loader, device, description=level_name if is_master else "")
+            benchmark_maes.append(b_metrics['mae'])
+            if is_master:
+                print(f"[{level_name.upper()}] MAE: {b_metrics['mae']:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
+
+        leveled_up, reset_lr = curriculum.update(val_mae, val_f1, benchmark_maes)
         
         # 2. Print Summary (Master Only)
         if is_master:

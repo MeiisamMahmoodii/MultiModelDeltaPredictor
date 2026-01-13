@@ -118,10 +118,13 @@ def compute_shd(pred_adj_logits, true_adj_matrix, threshold=0.0):
 def compute_f1(pred_adj_logits, true_adj_matrix, threshold=0.0):
     """
     Computes F1 Score for edges.
+    threshold: Logit threshold (default 0.0 -> Prob 0.5)
     """
     with torch.no_grad():
-        pred_prob = torch.sigmoid(pred_adj_logits)
-        pred_flat = (pred_prob > 0.5).cpu().numpy().flatten()
+        # pred_adj_logits are logits. true_adj is 0/1.
+        # Threshold directly on logits for consistency
+        pred_edges = (pred_adj_logits > threshold).float()
+        pred_flat = pred_edges.cpu().numpy().flatten()
         true_flat = true_adj_matrix.cpu().numpy().flatten()
         score = f1_score(true_flat, pred_flat, zero_division=0)
         
@@ -129,6 +132,25 @@ def compute_f1(pred_adj_logits, true_adj_matrix, threshold=0.0):
         if score != score or score > 1e6:  # NaN or Inf check
             return 0.0
         return score
+
+def find_optimal_threshold(pred_adj_logits, true_adj_matrix):
+    """
+    Sweeps thresholds to find best F1 score.
+    Returns: best_threshold (logit), best_f1, best_shd
+    """
+    thresholds = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0]
+    best_f1 = -1.0
+    best_thresh = 0.0
+    best_shd = -1.0
+    
+    for t in thresholds:
+        f1 = compute_f1(pred_adj_logits, true_adj_matrix, threshold=t)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thresh = t
+            best_shd = compute_shd(pred_adj_logits, true_adj_matrix, threshold=t)
+            
+    return best_thresh, best_f1, best_shd
 
 def compute_mae(pred_delta, true_delta):
     """

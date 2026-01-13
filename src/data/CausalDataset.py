@@ -17,9 +17,21 @@ class CausalDataset(IterableDataset):
         self.intervention_scale_range = intervention_scale_range
     
     def __iter__(self):
+        # Validation Cache Mechanism
+        if not self.infinite and hasattr(self, 'val_cache') and self.val_cache:
+            # Yield from cache if available
+            for batch in self.val_cache:
+                yield batch
+            return
+
         graphs_generated = 0
+        validation_buffer = []
+
         while True:
             if not self.infinite and graphs_generated >= self.validation_graphs:
+                # If validation mode, save cache and break
+                if not self.infinite:
+                    self.val_cache = validation_buffer
                 break
             
             # Sample Random Intervention Scale
@@ -39,41 +51,80 @@ class CausalDataset(IterableDataset):
             
             graphs_generated += 1
             
-            # --- DATA REUSE CACHE ---
-            # We want to yield this EXACT same graph and data `reuse_factor` times.
-            # However, yields in Python generators are sequential.
-            # We can't "rewind". 
-            # So we collect all items from this graph first?
-            # Or simpler: We just wrap the yield loop in a repeat loop!
+            # --- BATCH OPTIMIZATION: Yield chunks directly ---
+            # Instead of yielding 1 row at a time, we yield the whole interaction block.
+            # But the DataLoader expects individual samples (or requires a custom collate that handles batches).
+            # To be compatible with standard DataLoader, we usually yield samples.
+            # BUT the user specifically asked for "Yield pre-batched tensors".
+            # This implies `collate_fn` needs to handle List[Batch] -> Batch.
+            # Wait, `collate_fn_pad` currently handles List[Dict].
+            # If we yield a Batch (Dict of stacks), collate_fn needs to merge them.
+            # A simple way: Yield the whole (samples_per_graph) stack as ONE item?
+            # No, standard torch DataLoader adds a batch dimension.
+            # If we yield a list, collate gets List[List].
+            
+            # SOLUTION: We actually want to avoid the Python Loop overhead.
+            # We can yield the dictionary containing the full tensors.
+            # The DataLoader batch_size should be 1 (or small), and `collate` should just concat these.
+            # OR, we stick to yielding samples but minimize transformation overhead.
+            
+            # User Issue: "Yields single rows in a loop; collate_fn_pad then re-stacks them."
+            # Correct Fix: Yield the entire graph's data as ONE "Sample" (which is actually a mini-batch).
+            # Then set DataLoader batch_size=1, and the collate_fn just returns the item (or stacks if batch_size>1).
+            
+            # However, `samples_per_graph` is 64. If we yield 64 samples at once, that's a batch.
+            # Let's yield the tensors directly.
             
             adj = torch.tensor(nx.to_numpy_array(res['dag']), dtype=torch.float32)
             base_tensor = res['base_tensor']
             
-            # Pre-calculate interactions to avoid re-computing inside loop
-            interactions = []
+            # Pre-calculate interactions
+            # Flatten all interactions into one big tensor for this graph
+            all_int_tensors = []
+            all_masks = []
+            all_indices = []
+            all_targets = []
+            all_deltas = []
+            
             for i in range(1, len(res['all_dfs'])):
                 int_tensor = torch.tensor(res['all_dfs'][i].values, dtype=torch.float32)
                 int_mask = torch.tensor(res['all_masks'][i][0], dtype=torch.float32)
                 int_node_idx = torch.argmax(int_mask)
-                interactions.append((int_tensor, int_mask, int_node_idx))
+                
+                # Twin World Matching
+                # Base uses same noise, so row j matches row j
+                # We can process the whole block at once
+                target_block = base_tensor # (N_samples, N_vars)
+                delta_block = int_tensor - target_block
+                
+                all_int_tensors.append(int_tensor)
+                all_masks.append(int_mask.unsqueeze(0).expand(int_tensor.shape[0], -1)) # Expand mask
+                all_indices.append(int_node_idx.unsqueeze(0).expand(int_tensor.shape[0])) # Expand idx
+                all_targets.append(target_block)
+                all_deltas.append(delta_block)
             
-            # REUSE LOOP
+            # Stack everything for this graph
+            # Total samples = Interventions * Samples_Per_Int
+            # This yields data for ONE graph.
+            # We yield this as a "Batch".
+            
+            # Reuse logic
             for _ in range(self.reuse_factor):
-                for int_tensor, int_mask, int_node_idx in interactions:
-                    # Twin World Matching:
-                    for j in range(int_tensor.shape[0]):
-                        target_row = base_tensor[j]
-                        intervened_row = int_tensor[j]
-                        
-                        # Delta calculation:
-                        delta = intervened_row - target_row
-                        
-                        yield {
-                            "base_samples": base_tensor,
-                            "int_samples": int_tensor, 
-                            "target_row": target_row,
-                            "int_mask": int_mask,
-                            "int_node_idx": int_node_idx,
-                            "delta": delta,
-                            "adj": adj
-                        }
+                for i in range(len(all_int_tensors)):
+                     # Yielding Interaction Block (Batch of `samples_per_graph`)
+                     # This is much faster than row-by-row
+                     
+                     batch_item = {
+                        "base_samples": all_targets[i],
+                        "int_samples": all_int_tensors[i], 
+                        "target_row": all_targets[i],
+                        "int_mask": all_masks[i],
+                        "int_node_idx": all_indices[i],
+                        "delta": all_deltas[i],
+                        "adj": adj
+                     }
+                     
+                     yield batch_item
+                     
+                     if not self.infinite:
+                         validation_buffer.append(batch_item)

@@ -2,87 +2,114 @@ import torch
 import torch.nn as nn
 
 def compute_h_loss(adj_matrix):
+    """
+    Computes DAGness (Acyclicity) constraint.
+    Input: (B, N, N) or (N, N)
+    Output: Scalar H-score (mean over batch if batched)
+    """
+    if len(adj_matrix.shape) == 3:
+        # Batched: Compute Per-Sample H-Loss to avoid "Average Graph" bias
+        # Batch size is small (1-4), so iteration is acceptable and exact.
+        h_sum = 0.0
+        B = adj_matrix.shape[0]
+        for i in range(B):
+            h_sum += _h_loss_single(adj_matrix[i])
+        return h_sum / B
+    else:
+        return _h_loss_single(adj_matrix)
+
+def _h_loss_single(adj_matrix):
     N = adj_matrix.shape[-1]
-    # Matrix Exp is not implemented for MPS, so we fallback to CPU for this op
     if adj_matrix.device.type == 'mps':
         A_sq = (adj_matrix * adj_matrix).cpu()
         h = torch.trace(torch.matrix_exp(A_sq)) - N
         h_val = h.to(adj_matrix.device)
     else:
+        # Polynomial approximation is safer for gradients? 
+        # But standard NO-TEARS uses matrix_exp.
         A_sq = adj_matrix * adj_matrix
         h = torch.trace(torch.matrix_exp(A_sq)) - N
         h_val = h
     
-    # Safety: Check for NaN/Inf
+    # Safety
     if (h_val != h_val) or (h_val.abs() > 1e6):
         return torch.tensor(0.0, device=adj_matrix.device, dtype=adj_matrix.dtype)
-    
     return h_val
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        bce_loss = nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1-pt)**self.gamma * bce_loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        return focal_loss.sum()
+
 def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj, 
-                   lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0):
+                   lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0,
+                   loss_type='bce'): # Added loss_type
+    
     loss_delta = nn.functional.l1_loss(pred_delta, true_delta)
     
-    # Safety: Clamp loss components to prevent explosion
+    # Safety: Clamp loss components
     if (loss_delta != loss_delta) or (loss_delta > 1e6):
         loss_delta = torch.tensor(1.0, device=pred_delta.device, dtype=pred_delta.dtype)
     
     # Phase 5: Unified Learning (Structure Enabled)
-    # 1. DAG Construction Loss (Binary Cross Entropy on Edges)
-    # pred_adj are raw logits.
-    loss_dag = nn.functional.binary_cross_entropy_with_logits(
-        pred_adj, 
-        true_adj,
-        pos_weight=torch.tensor(3.0, device=pred_adj.device) # Fixed imbalance correction (3.0 for ~25% density)
-    )
+    # 1. DAG Construction Loss
+    loss_dag = torch.tensor(0.0, device=pred_adj.device)
+    
+    if loss_type == 'focal':
+        # Focal Loss (Better for sparse graphs, focuses on hard examples)
+        # alpha=0.25 (balance), gamma=2.0 (focus)
+        fl = FocalLoss(alpha=0.25, gamma=2.0)
+        loss_dag = fl(pred_adj, true_adj)
+    else:
+        # Standard BCE with Dynamic Imbalance Correction
+        num_pos = true_adj.sum()
+        num_total = true_adj.numel()
+        num_neg = num_total - num_pos
+        pos_weight = num_neg / (num_pos + 1e-6)
+        pos_weight = torch.clamp(pos_weight, min=1.0, max=20.0)
+        
+        loss_dag = nn.functional.binary_cross_entropy_with_logits(
+            pred_adj, 
+            true_adj,
+            pos_weight=pos_weight
+        )
     
     # Safety: Clamp loss
     if (loss_dag != loss_dag) or (loss_dag > 1e6):
         loss_dag = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     
     # 2. Acyclicity Loss (H-Score)
-    # We need Probabilities for H-score
+    # We need Probabilities for H-score (clamp to [0,1] approximation naturally via sigmoid)
+    # But NO-TEARS usually operates on W^2, where W is adjacency weights.
+    # Here we use sigmoid(logits).
     adj_prob = torch.sigmoid(pred_adj)
-    # Reduce to [N, N] for H-score? Unbatching?
-    # Actually compute_h_loss usually expects a single matrix or batched trace.
-    # Our compute_h_loss implementation: A_sq = adj * adj.
-    # If adj is (B, N, N), matmul works per batch.
-    # Trace logic needs to handle batch dimension.
-    
-    # Let's check compute_h_loss implementation above. 
-    # It does `torch.trace`. torch.trace only works on 2D tensors!
-    # We need to average h over the batch.
     
     loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_h > 0:
-        # Loop over batch for safety or vectorize trace?
-        # Einsum 'bii -> b' is trace.
-        # But matrix_exp is expensive.
-        # Use mean matrix? No, H(Mean(A)) != Mean(H(A)).
-        # For efficiency, let's take mean of probabilities and enforce H on that?
-        # "Consensus DAG": The batch likely comes from the SAME graph structure (if seeded identically)
-        # BUT in our generator, every sample might be a different graph?
-        # Wait, SCMGenerator main loop makes ONE graph per epoch step? No.
-        # CausalDataset generates infinite random graphs.
-        # So every sample in batch is a DIFFERENT graph.
-        # We must penalize H for EACH graph.
-        # This is very expensive (Matrix Exp for BxN).
-        # Optimization: Only calculate H on a subset or accumulate?
-        # Let's try iterating for now (Batch=16, 32 is small).
+        # Exact Per-Sample H-Loss (No consensus bias)
+        loss_h = compute_h_loss(adj_prob)
         
-        # Consensus DAG Approximation (O(N^3) instead of O(B*N^3))
-        # We compute h-loss on the MEAN adjacency of the batch.
-        # This approximates the "average acyclicity" and significantly speeds up training.
-        adj_mean = adj_prob.mean(dim=0)
-        loss_h = compute_h_loss(adj_mean)
-        
-        # Safety: Clamp loss_h
+        # Safety
         if (loss_h != loss_h) or (loss_h > 1e6):
             loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
 
     loss_l1 = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_l1 > 0:
-        loss_l1 = torch.mean(torch.abs(adj_prob))
+        # User Feedback Fix: Naive L1(probs) targets 0 density (empty graph).
+        # We change this to L1 Error (MAE) against True Adjacency.
+        # This encourages sparsity ONLY where true_adj is 0, and encourages edges where true_adj is 1.
+        # It acts as a linear complement to BCE.
+        loss_l1 = nn.functional.l1_loss(adj_prob, true_adj)
         # Safety: Clamp loss_l1
         if (loss_l1 != loss_l1) or (loss_l1 > 1e6):
             loss_l1 = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)

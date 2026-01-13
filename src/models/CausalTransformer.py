@@ -149,6 +149,11 @@ class MoELayer(nn.Module):
         
         return output.view(batch_size, num_active), aux_loss
 
+    def reset_metrics(self):
+        """Resets expert usage counters for new epoch"""
+        self.expert_counts.zero_()
+        self.total_tokens.zero_()
+
     def get_expert_metrics(self):
         """
         Computes entropy and gini coefficient of expert usage.

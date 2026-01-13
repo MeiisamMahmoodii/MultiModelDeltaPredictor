@@ -71,9 +71,10 @@ class CurriculumManager:
         
         return benchmarks
 
-    def update(self, val_mae, val_f1):
+    def update(self, val_mae, val_f1, benchmark_maes=None):
         """
         Check if we should level up.
+        benchmark_maes: List of MAE scores from cross-difficulty benchmarks.
         Returns: (leveled_up: bool, reset_lr: bool)
         """
         # Simple gating logic based on MAE (since our main goal is Delta Prediction)
@@ -87,6 +88,19 @@ class CurriculumManager:
         else: thresh = 30.0             # Was 40
         
         if val_mae < thresh:
+            # Check benchmarks if provided (Robustness Check)
+            if benchmark_maes:
+                avg_bench = np.mean(benchmark_maes)
+                min_bench = np.min(benchmark_maes)
+                # If even the "Hard" benchmark is decently solved (e.g. < 2*thresh), allowing leveling.
+                # Or if average performance is good.
+                # Logic: Don't level up if we are completely failing harder tasks (e.g. MAE > 5.0)
+                # This prevents "Local Minima" on easy tasks.
+                if avg_bench > (thresh * 1.5) and avg_bench > 4.0:
+                    # Too hard, stay here.
+                    self.stability_counter = 0 
+                    return False, False
+            
             self.stability_counter += 1
         else:
             self.stability_counter = 0
