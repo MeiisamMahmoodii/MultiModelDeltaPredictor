@@ -1,15 +1,48 @@
 import argparse
+import csv
+import os
 import random
-        if is_master:
-            print(f"Val Level {curriculum.current_level} | MAE: {val_mae:.3f} | SHD: {val_metrics['shd']:.1f} | F1: {val_f1:.3f} | TPR: {val_tpr:.2f} | FDR: {val_metrics['fdr']:.2f}")
+
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+
+from src.data.CausalDataset import CausalDataset
+from src.data.SCMGenerator import SCMGenerator
+from src.data.encoder import collate_fn_pad
+from src.models.CausalTransformer import CausalTransformer
+from src.training.curriculum import CurriculumManager
+from src.training.loss import causal_loss_fn
+from src.training.metrics import compute_f1, compute_mae, compute_shd, compute_tpr_fdr
+
+try:
+    from rich import print as rprint
+    from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+    from rich.table import Table
+
+    RICH_AVAILABLE = True
+except Exception:
+    RICH_AVAILABLE = False
+
+
+def setup_ddp():
+    """Initialize torch.distributed when launched under torchrun."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
         if torch.cuda.is_available():
-            # Robust device setting: handle cases where CUDA_VISIBLE_DEVICES masks GPUs per process
+            # Respect CUDA_VISIBLE_DEVICES masking per process
             n_devices = torch.cuda.device_count()
             if n_devices > 0:
                 torch.cuda.set_device(local_rank % n_devices)
-        # MPS doesn't support set_device like CUDA, handled by device object later
+        # MPS does not need set_device; handled by torch.device later
         return local_rank
+
     return 0
+
 
 def cleanup_ddp():
     if dist.is_initialized():
