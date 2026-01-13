@@ -192,7 +192,7 @@ def main():
     parser.add_argument("--lambda_aux_moe", type=float, default=0.1, help="Auxiliary load-balancing loss weight for MoE")
     parser.add_argument("--router_tau", type=float, default=1.0, help="Gumbel-Softmax temperature for MoE router")
     parser.add_argument("--lambda_delta", type=float, default=100.0, help="Weight for Delta Prediction Loss")
-    parser.add_argument("--grad_clip", type=float, default=10.0, help="Gradient Clipping Max Norm") # Bumped to 10.0
+    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient Clipping Max Norm") # Reduced to 1.0 for stability
     parser.add_argument("--loss_type", type=str, default="bce", choices=["bce", "focal"], help="DAG Loss Type")
     
     # Ablation Flags
