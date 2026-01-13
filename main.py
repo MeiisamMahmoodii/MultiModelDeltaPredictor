@@ -699,10 +699,26 @@ def main():
         # 2. Print Summary (Master Only)
         if is_master:
             # Re-fetch metrics for summary
+            # Retrieve MoE Metrics (Aggregate across layers)
+            total_entropy = 0.0
+            total_gini = 0.0
+            num_layers = 0
+            
             if hasattr(model, 'module'):
-                moe_metrics = model.module.moe.get_expert_metrics()
+                layers = model.module.transformer.layers
             else:
-                moe_metrics = model.moe.get_expert_metrics()
+                layers = model.transformer.layers
+                
+            for layer in layers:
+                metrics = layer.moe.get_expert_metrics()
+                total_entropy += metrics['entropy']
+                total_gini += metrics['gini']
+                num_layers += 1
+            
+            avg_entropy = total_entropy / num_layers if num_layers > 0 else 0.0
+            avg_gini = total_gini / num_layers if num_layers > 0 else 0.0
+            
+            moe_metrics = {'entropy': avg_entropy, 'gini': avg_gini}
 
             if RICH_AVAILABLE:
                 table = Table(title=f"Epoch {epoch} Summary | Level {curriculum.current_level}")
