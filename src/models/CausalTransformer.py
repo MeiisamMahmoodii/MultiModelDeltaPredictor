@@ -717,3 +717,33 @@ class CausalTransformer(nn.Module):
     def anneal_temperature(self, epoch, total_epochs):
         # No tau needed for Gumbel (Hard=True)
         return 1.0
+# --- Helper for Differentiable AllReduce ---
+class DifferentiableAllReduce(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        # Must be in-place for NCCL, but we want to return a new tensor to keep graph clean? 
+        # Actually all_reduce is in-place.
+        # We can implement it as: x is input.
+        # But modifying x in place with autograd is tricky.
+        # Better: Clone x, reduce clone, return clone.
+        # To avoid "autograd kernel not registered" warning, 
+        # operations here should not be tracked unless we use save_for_backward.
+        
+        if torch.distributed.is_initialized():
+            x_reduced = x.clone() 
+            # all_reduce is in-place on x_reduced.
+            # DifferentiableAllReduce is a Function, so this forward runs in no_grad mode (usually).
+            # But x_reduced inherits properties? verification needed.
+            # "The forward method... run in a torch.no_grad() context automatically."
+            # So x_reduced.requires_grad is False. Safe to all_reduce.
+            torch.distributed.all_reduce(x_reduced, op=torch.distributed.ReduceOp.SUM)
+            return x_reduced
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Gradient of Sum(x_1...x_N) w.r.t x_i is just 1.0 * grad_output
+        return grad_output
+
+def differentiable_all_reduce_sum(x):
+    return DifferentiableAllReduce.apply(x)
