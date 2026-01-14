@@ -99,13 +99,32 @@ class SCMGenerator:
             elif eq == 16: dag[u][v]['type'] = "rational"
         return dag
 
-    def generate_data(self, dag, num_samples, noise_scale=None, intervention=None, noise=None):
+    def sample_noise(self, size, noise_type='normal'):
+        """
+        Sample noise from different distributions for Domain Randomization (Sim-to-Real).
+        """
+        if noise_type == 'normal':
+            return np.random.normal(scale=self.noise_scale, size=size)
+        elif noise_type == 'laplace':
+            return np.random.laplace(scale=self.noise_scale, size=size)
+        elif noise_type == 'gumbel':
+            return np.random.gumbel(scale=self.noise_scale, size=size)
+        elif noise_type == 'cauchy':
+            # Cauchy has undefined variance. scale=1.0 is standard.
+            # Clip rigorously later.
+            return np.random.standard_cauchy(size=size) * self.noise_scale
+        elif noise_type == 'uniform':
+            return np.random.uniform(low=-self.noise_scale*1.73, high=self.noise_scale*1.73, size=size)
+        else:
+            return np.random.normal(scale=self.noise_scale, size=size)
+
+    def generate_data(self, dag, num_samples, noise_scale=None, intervention=None, noise=None, noise_type='normal'):
         if noise_scale is None: noise_scale = self.noise_scale
         nodes = list(dag.nodes())
         
         # Twin World Logic: Use provided noise if available
         if noise is None:
-            noise = np.random.normal(scale=noise_scale, size=(num_samples, len(nodes)))
+            noise = self.sample_noise(size=(num_samples, len(nodes)), noise_type=noise_type)
         
         # Safety: Clip noise to prevent numerical issues
         noise = np.clip(noise, -50, 50)
@@ -182,7 +201,7 @@ class SCMGenerator:
             data[node] = np.clip(total, -30, 30)
         return data, noise
 
-    def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True, intervention_scale=1.0):
+    def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True, intervention_scale=1.0, random_noise_type=True):
         if num_nodes is None: num_nodes = self.num_nodes
         dag = self.generate_dag(num_nodes, edge_prob)
         dag = self.edge_parameters(dag)
@@ -205,12 +224,19 @@ class SCMGenerator:
         # shape: (num_samples, num_vars)
         # Fix: Ensure noise is large enough for both base and intervention batches
         max_samples = max(num_samples_base, num_samples_per_intervention)
-        global_noise = np.random.normal(scale=self.noise_scale, size=(max_samples, noise_dim))
+        
+        # Domain Randomization: Pick a noise type for this Universe
+        if random_noise_type:
+            noise_type = np.random.choice(['normal', 'laplace', 'gumbel', 'cauchy', 'uniform'])
+        else:
+            noise_type = 'normal'
+            
+        global_noise = self.sample_noise(size=(max_samples, noise_dim), noise_type=noise_type)
         
         # Base Data (Observational) using Global Noise
         # Note: If num_samples_base != num_samples_per_int, we have a mismatch.
         # Now we strictly slice the noise to match the requested base samples.
-        df_base, _ = self.generate_data(dag, num_samples_base, noise=global_noise[:num_samples_base])
+        df_base, _ = self.generate_data(dag, num_samples_base, noise=global_noise[:num_samples_base], noise_type=noise_type)
         
         # Interventions
         prob = intervention_prob if intervention_prob else self.intervention_prob
@@ -239,9 +265,9 @@ class SCMGenerator:
                 noise_for_int = global_noise[:num_samples_per_intervention]
                 if not use_twin_world:
                     # Generate fresh noise for this intervention
-                    noise_for_int = np.random.normal(scale=self.noise_scale, size=(num_samples_per_intervention, noise_dim))
+                    noise_for_int = self.sample_noise(size=(num_samples_per_intervention, noise_dim), noise_type=noise_type)
                     
-                df_int, _ = self.generate_data(dag, num_samples_per_intervention, intervention={t: val}, noise=noise_for_int)
+                df_int, _ = self.generate_data(dag, num_samples_per_intervention, intervention={t: val}, noise=noise_for_int, noise_type=noise_type)
                 
                 mask = np.zeros((num_samples_per_intervention, len(nodes)))
                 mask[:, t] = 1.0

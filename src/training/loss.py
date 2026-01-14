@@ -57,9 +57,7 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
     
     loss_delta = nn.functional.l1_loss(pred_delta, true_delta)
     
-    # Safety: Clamp loss components
-    if (loss_delta != loss_delta) or (loss_delta > 1e6):
-        loss_delta = torch.tensor(1.0, device=pred_delta.device, dtype=pred_delta.dtype)
+    # Removed: Loss clamping that was hiding real failures
     
     # Phase 5: Unified Learning (Structure Enabled)
     # 1. DAG Construction Loss
@@ -91,9 +89,7 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
             pos_weight=pos_weight
         )
     
-    # Safety: Clamp loss
-    if (loss_dag != loss_dag) or (loss_dag > 1e6):
-        loss_dag = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
+    # Removed: Loss clamping that was hiding real failures
     
     # 2. Acyclicity Loss (H-Score)
     # We need Probabilities for H-score (clamp to [0,1] approximation naturally via sigmoid)
@@ -107,9 +103,7 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
         # Exact Per-Sample H-Loss (No consensus bias)
         loss_h = compute_h_loss(adj_prob)
         
-        # Safety
-        if (loss_h != loss_h) or (loss_h > 1e6):
-            loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
+        # Removed: Loss clamping that was hiding real failures
 
     loss_l1 = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_l1 > 0:
@@ -118,15 +112,11 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
         # This encourages sparsity ONLY where true_adj is 0, and encourages edges where true_adj is 1.
         # It acts as a linear complement to BCE.
         loss_l1 = nn.functional.l1_loss(adj_prob, true_adj)
-        # Safety: Clamp loss_l1
-        if (loss_l1 != loss_l1) or (loss_l1 > 1e6):
-            loss_l1 = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
+        # Removed: Loss clamping that was hiding real failures
         
     total_loss = (loss_delta * lambda_delta) + (loss_dag * lambda_dag) + (loss_h * lambda_h) + (loss_l1 * lambda_l1)
     
-    # Final safety check
-    if (total_loss != total_loss) or (total_loss > 1e6):
-        total_loss = torch.tensor(1.0, device=pred_delta.device, dtype=pred_delta.dtype)
+    # Removed: Loss clamping that was hiding real failures
     
     return total_loss, {
         "delta": loss_delta.item() if loss_delta.item() == loss_delta.item() else 0.0, 

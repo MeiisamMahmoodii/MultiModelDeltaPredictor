@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
@@ -24,10 +25,27 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
 
-    def forward(self, x, seq_len=None):
+    def forward(self, x, seq_len=None, position_ids=None):
         # x: [batch, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+            
+        if position_ids is not None:
+            # Custom position indexing (Permutation Equivariance)
+            # position_ids: [batch, seq_len]
+            # cached: [1, 1, max_len, dim] -> [max_len, dim]
+            cos = self.cos_cached.squeeze(0).squeeze(0)
+            sin = self.sin_cached.squeeze(0).squeeze(0)
+            
+            # Gather: [batch, seq_len] -> [batch, seq_len, dim]
+            # Use F.embedding for efficiency
+            # Ensure position_ids are clamped to max_len
+            position_ids = position_ids.clamp(max=self.max_seq_len_cached - 1)
+            
+            cos_out = F.embedding(position_ids, cos).unsqueeze(1) # [batch, 1, seq, dim]
+            sin_out = F.embedding(position_ids, sin).unsqueeze(1)
+            
+            return cos_out.to(dtype=x.dtype), sin_out.to(dtype=x.dtype)
 
         return (
             self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),

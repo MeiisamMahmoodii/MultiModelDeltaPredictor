@@ -121,11 +121,26 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 idx = batch['int_node_idx'].to(device)
                 
                 # Forward
-                deltas, logits, adj, _, _ = model(base, int_s, target, mask)
+                deltas, logits, adj, log_sigma, _ = model(base, int_s, target, mask)
                 
-                # Compute Loss (Standard validation loss)
-                # Note: We rely on causal_loss_fn components or just report MAE/BCE separately.
-                # Here we just track MAE and custom structure metrics.
+                # Compute I-NLL (Negative Log Likelihood)
+                # Loss = 0.5 * (exp(-log_sig) * (y - y_hat)^2 + log_sig)
+                # Pytorch GaussianNLLLoss takes var (sigma^2), not log_sigma directly usually, 
+                # but we can implement manually for stability.
+                # Let's assume log_sigma is log(sigma^2) for stability or log(sigma).
+                # Implementation in CausalTransformer was just "Linear(..., 1)". 
+                # Let's interpret output as log(sigma^2).
+                # nll = 0.5 * (torch.exp(-log_sigma) * (deltas - batch['delta'].to(device))**2 + log_sigma)
+                # For metric reporting, we sum it up.
+                
+                mse = (deltas - batch['delta'].to(device))**2
+                nll = 0.5 * (torch.exp(-log_sigma) * mse + log_sigma)
+                
+                total_nll += nll.mean().item()
+                total_loss += nll.mean().item() # Track NLL as total loss? Or keep MAE. 
+                # Let's just track NLL separately.
+                
+                # Compute MAE
                 total_mae += compute_mae(deltas, batch['delta'].to(device))
                 
                 # Collect Structure Predictions (CPU to save GPU memory)
@@ -138,7 +153,9 @@ def evaluate_loader(model, loader, device, description="Validating"):
             
     # Aggregate results
     if num_batches == 0:
-        return {'mae': 0.0, 'f1': 0.0, 'shd': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'loss': 0.0}
+        return {'mae': 0.0, 'f1': 0.0, 'shd': 0.0, 'nll': 0.0, 'tpr': 0.0, 'fdr': 0.0, 'loss': 0.0}
+    
+    avg_nll = total_nll / num_batches
 
     # Concatenate all logits/adj
     all_logits = torch.cat(all_logits, dim=0)
@@ -157,10 +174,11 @@ def evaluate_loader(model, loader, device, description="Validating"):
     
     # Logging
     if description:
-        print(f"[{description}] MAE: {avg_mae:.4f} | F1 (0.0): {f1_std:.3f} | Best F1: {best_f1:.3f} (@{best_thresh}) | SHD (Opt): {best_shd_opt:.1f}")
+        print(f"[{description}] MAE: {avg_mae:.4f} | NLL: {avg_nll:.4f} | F1 (0.0): {f1_std:.3f} | Best F1: {best_f1:.3f} (@{best_thresh}) | SHD (Opt): {best_shd_opt:.1f}")
 
     return {
         'mae': avg_mae,
+        'nll': avg_nll,      # Generative Metric
         'f1': best_f1,       # Report BEST F1 for curriculum
         'shd': best_shd_opt, # Report BEST SHD for curriculum
         'tpr': tpr,
@@ -523,12 +541,9 @@ def main():
             loss += args.lambda_aux_moe * aux_safe
             items['aux_moe'] = aux_safe.item()
 
-            # Final loss safety guard
-            if torch.isnan(loss) or torch.isinf(loss):
-                # ISSUE 12: Maintain gradients even on replacement (Scale 0.0 + dummy) or 1.0 w/ grad?
-                # If we return a constant 1.0 with requires_grad=True, the gradient is 0.0.
-                # However, this effectively "skips" the batch safely without crashing or breaking the graph.
-                loss = torch.tensor(1.0, device=loss.device, requires_grad=True)
+            # REMOVED: Final loss safety guard that was hiding real failures
+            # If loss is NaN/Inf, we MUST debug it, not mask it with a constant.
+            # Masking with constant prevents gradient flow → model learns nothing.
             
             optimizer.zero_grad()
             loss.backward()

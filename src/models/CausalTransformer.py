@@ -132,7 +132,22 @@ class SimpleMoELayer(nn.Module):
         
         # Compute load balancing loss
         probs = F.softmax(logits, dim=-1)
-        importance = probs.mean(dim=0)  # (num_experts,)
+        
+        # 1. Local Statistics
+        local_prob_sum = probs.sum(dim=0) # (Experts,)
+        local_count = torch.tensor(probs.size(0), device=probs.device, dtype=probs.dtype)
+        
+        # 2. Global Synchronization (DDP)
+        if torch.distributed.is_initialized():
+            # Sync sum of probabilities
+            torch.distributed.all_reduce(local_prob_sum, op=torch.distributed.ReduceOp.SUM)
+            # Sync total token count
+            torch.distributed.all_reduce(local_count, op=torch.distributed.ReduceOp.SUM)
+            
+        # 3. Compute Global Importance
+        global_count = torch.clamp(local_count, min=1.0)
+        importance = local_prob_sum / global_count # (Experts,)
+        
         target = 1.0 / self.num_experts
         aux_loss = torch.mean((importance - target) ** 2)
         
@@ -221,8 +236,25 @@ class MoELayer(nn.Module):
         
         # Aux Loss: Load Balancing
         probs = F.softmax(logits, dim=-1) # (Total, Experts)
-        # Importance (Batch-wise MEAN of probs)
-        importance = probs.mean(dim=0) # (Experts,)
+        
+        # 1. Local Statistics
+        local_prob_sum = probs.sum(dim=0) # (Experts,)
+        local_count = torch.tensor(probs.size(0), device=probs.device, dtype=probs.dtype)
+        
+        # 2. Global Synchronization (DDP)
+        is_ddp = torch.distributed.is_initialized()
+        print(f"DEBUG: torch.distributed.is_initialized() = {is_ddp}")
+        if is_ddp:
+            # Sync sum of probabilities
+            torch.distributed.all_reduce(local_prob_sum, op=torch.distributed.ReduceOp.SUM)
+            # Sync total token count
+            torch.distributed.all_reduce(local_count, op=torch.distributed.ReduceOp.SUM)
+            
+        # 3. Compute Global Importance
+        # Avoid division by zero
+        global_count = torch.clamp(local_count, min=1.0)
+        importance = local_prob_sum / global_count # (Experts,)
+        
         # Target: Importance should be uniform (1 / N)
         target = 1.0 / self.num_experts
         aux_loss = torch.mean((importance - target)**2) # MSE from Uniform Distribution
@@ -350,7 +382,7 @@ class RoPEAttentionLayer(nn.Module):
         self.moe = SimpleMoELayer(d_model, num_experts=num_experts, expansion_factor=4)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, rotary_emb=None, attn_mask=None):
+    def forward(self, x, rotary_emb=None, pos_ids=None, attn_mask=None):
         # x: (Batch, Seq, D)
         B, S, D = x.shape
         
@@ -365,7 +397,8 @@ class RoPEAttentionLayer(nn.Module):
         
         # Apply RoPE
         if rotary_emb is not None:
-            cos, sin = rotary_emb(q, seq_len=S) # Get cos/sin for this sequence length
+            # Pass pos_ids (Variable IDs) if available for set-based equivariance
+            cos, sin = rotary_emb(q, seq_len=S, position_ids=pos_ids) 
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
             
         # Attention
@@ -398,10 +431,10 @@ class RoPETransformer(nn.Module):
         ])
         self.rope = RotaryEmbedding(d_model // nhead, max_position_embeddings=max_len)
         
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, pos_ids=None, attn_mask=None):
         total_aux = 0.0
         for layer in self.layers:
-            x, aux_loss = layer(x, self.rope, attn_mask=attn_mask)
+            x, aux_loss = layer(x, self.rope, pos_ids=pos_ids, attn_mask=attn_mask)
             total_aux += aux_loss
         return x, total_aux
 
@@ -468,6 +501,9 @@ class CausalTransformer(nn.Module):
         
         # 3. Physics Head: Simple projection from token embeddings to delta predictions
         self.physics_head = nn.Linear(d_model, 1)
+        # Phase 4: Uncertainty Head for I-NLL (Generative Metric)
+        # Predicts log(sigma^2) or log(sigma)
+        self.uncertainty_head = nn.Linear(d_model, 1)
         
         # 4. Learned Causal Mask (Phase 3 Hotfix: Topology-Aware Attention)
         # "Novel Solution: Learned Causal Masking"
@@ -484,7 +520,10 @@ class CausalTransformer(nn.Module):
         # This is essentially one attention block trained to find parents.
         self.dag_query = nn.Linear(d_model, d_model)
         self.dag_key = nn.Linear(d_model, d_model)
-        self.dag_scale = d_model ** -0.5
+        # CRITICAL FIX: Use 1.0 scale instead of sqrt(d_model)^-1
+        # sqrt(512)^-1 = 0.044 dampens logits → structure signal lost
+        # Use 1.0 to preserve signal magnitude; BCE can handle large logits
+        self.dag_scale = 1.0
 
     def forward(self, base_samples, int_samples, target_row, int_mask, mcm_mask=None):
         """
@@ -499,16 +538,16 @@ class CausalTransformer(nn.Module):
         # Pass 1: Initial Guess
         if self.grad_checkpoint and self.training:
             # Inputs to pass 1 don't require grad, so use_reentrant=False is mandatory for checkpoint to work
-            deltas_1, mcm_out, logits_1, aux_1 = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, None, dummy_tensor, use_reentrant=False)
+            deltas_1, log_sigma_1, logits_1, aux_1 = checkpoint(self._forward_pass, base_samples, int_samples, target_row, int_mask, mcm_mask, None, dummy_tensor, use_reentrant=False)
         else:
-            deltas_1, mcm_out, logits_1, aux_1 = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask, None, dummy_tensor)
+            deltas_1, log_sigma_1, logits_1, aux_1 = self._forward_pass(base_samples, int_samples, target_row, int_mask, mcm_mask, None, dummy_tensor)
         
         if mcm_mask is not None:
              B, N = base_samples.shape
-             dummy_logits = torch.zeros(B, N, N, device=base_samples.device)
              dummy_adj = torch.zeros(B, N, N, device=base_samples.device)
              # Return 0.0 aux loss for MCM
-             return deltas_1, dummy_logits, dummy_adj, mcm_out, 0.0
+             # Return None for log_sigma in MCM pass? Or dummy.
+             return deltas_1, dummy_logits, dummy_adj, None, 0.0
         
         # --- Causal Masking Logic ---
         # 1. Compute Mask from Pass 1 Logits
@@ -538,9 +577,9 @@ class CausalTransformer(nn.Module):
              
         if self.grad_checkpoint and self.training:
             # Capture logits_2 for Iterative Structure Refinement
-            deltas_2, _, logits_2, aux_2 = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, attn_mask, dummy_tensor, use_reentrant=False)
+            deltas_2, log_sigma_2, logits_2, aux_2 = checkpoint(self._forward_pass, refined_base, int_samples, target_row, int_mask, None, attn_mask, dummy_tensor, use_reentrant=False)
         else:
-            deltas_2, _, logits_2, aux_2 = self._forward_pass(refined_base, int_samples, target_row, int_mask, None, attn_mask, dummy_tensor)
+            deltas_2, log_sigma_2, logits_2, aux_2 = self._forward_pass(refined_base, int_samples, target_row, int_mask, None, attn_mask, dummy_tensor)
         
         # --- Recursive Mask Refinement (Pass 2 -> Pass 3) ---
         # "Iterative Structure Refinement": Use structure from Pass 2 to guide Pass 3
@@ -556,9 +595,9 @@ class CausalTransformer(nn.Module):
              refined_base_2 = base_samples + deltas_2
              
         if self.grad_checkpoint and self.training:
-             deltas_final, _, logits_final, aux_3 = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, attn_mask_2, dummy_tensor, use_reentrant=False)
+             deltas_final, log_sigma_final, logits_final, aux_3 = checkpoint(self._forward_pass, refined_base_2, int_samples, target_row, int_mask, None, attn_mask_2, dummy_tensor, use_reentrant=False)
         else:
-             deltas_final, _, logits_final, aux_3 = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None, attn_mask_2, dummy_tensor)
+             deltas_final, log_sigma_final, logits_final, aux_3 = self._forward_pass(refined_base_2, int_samples, target_row, int_mask, None, attn_mask_2, dummy_tensor)
         
         
         # Returning Dummy Logits/Adj for API compatibility with main.py metrics
@@ -574,7 +613,53 @@ class CausalTransformer(nn.Module):
         # Total Aux Loss (Average or Sum?) - Sum encourages all steps to be balanced.
         total_aux = aux_1 + aux_2 + aux_3
         
-        return deltas_final, logits_final, dummy_adj, None, total_aux
+        # Return log_sigma from final pass (logits_final comes from pass 3? No, logic is tricky)
+        # _forward_pass returns (deltas, log_sigma, logits, aux)
+        # In Pass 3: deltas_final, log_sigma_final, logits_final, aux_3
+        # Variable name in code (lines 596): deltas_final, _, logits_final, aux_3
+        # I need to capture log_sigma_final
+        
+        # Note: I need to update lines 539, 578, 596 to capture log_sigma!
+        # But wait, multi_replace cannot update disparate lines easily if they are not targeted.
+        # I will update the return here, but I must also update the CALL sites.
+        
+        return deltas_final, logits_final, dummy_adj, log_sigma_final, total_aux
+
+    @torch.no_grad()
+    def rollout_counterfactual(self, start_state, int_samples, int_mask, steps=5):
+        """
+        Generates a counterfactual trajectory (Generative World Model).
+        
+        Args:
+            start_state: (B, N) Initial state (t=0)
+            int_samples: (B, N) Intervention values (Target)
+            int_mask: (B, N) Intervention mask
+            steps: int (Number of rollout steps)
+            
+        Returns:
+            trajectory: (B, Steps+1, N) - [X_0, X_1, ..., X_steps]
+        """
+        trajectory = [start_state]
+        current_state = start_state.clone()
+        
+        # We assume target_row (Context) updates with current_state for autoregression
+        # Or we can keep it fixed if it represents "Initial Conditions".
+        # For a dynamical system x_t+1 = f(x_t), context is x_t.
+        
+        for _ in range(steps):
+            # Pass current state as base AND target_row
+            deltas, _, _, _, _ = self.forward(
+                base_samples=current_state, 
+                int_samples=int_samples, 
+                target_row=current_state, 
+                int_mask=int_mask
+            )
+            
+            # Apply physics: x_{t+1} = x_t + delta
+            current_state = current_state + deltas
+            trajectory.append(current_state.clone())
+            
+        return torch.stack(trajectory, dim=1)
 
     def _forward_pass(self, base_samples, int_samples, target_row, int_mask, mcm_mask, attn_mask=None, dummy_arg=None):
         # Prepare inputs for Encoder (Handle masking)
@@ -592,8 +677,9 @@ class CausalTransformer(nn.Module):
             enc_target[mcm_mask.bool()] = 0.0
             
         # Shared Forward Logic
-        x = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
-        x, aux_loss = self.transformer(x, attn_mask=attn_mask)
+        # Unpack pos_ids from encoder (Robust RoPE)
+        x, pos_ids = self.encoder(base_samples, int_samples, enc_target, enc_int_mask)
+        x, aux_loss = self.transformer(x, pos_ids=pos_ids, attn_mask=attn_mask)
         
         # Extract Value Tokens (embedding of the variable values)
         if self.ablation_no_interleaved:
@@ -607,8 +693,11 @@ class CausalTransformer(nn.Module):
         if self.ablation_no_physics:
              # Return zeros
              deltas = torch.zeros(value_tokens.shape[0], value_tokens.shape[1], device=value_tokens.device)
+             log_sigma = torch.zeros_like(deltas)
         else:
              deltas = self.physics_head(value_tokens).squeeze(-1)  # (B, N, D) -> (B, N)
+             # Predict log_sigma for I-NLL. (B, N)
+             log_sigma = self.uncertainty_head(value_tokens).squeeze(-1)
         
 
             
@@ -622,7 +711,8 @@ class CausalTransformer(nn.Module):
             
             logits = torch.matmul(Q, K.transpose(-2, -1)) * self.dag_scale
         
-        return deltas, None, logits, aux_loss
+        # Return log_sigma in the 2nd slot (formerly mcm_out)
+        return deltas, log_sigma, logits, aux_loss
 
     def anneal_temperature(self, epoch, total_epochs):
         # No tau needed for Gumbel (Hard=True)

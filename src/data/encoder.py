@@ -148,10 +148,16 @@ class InterleavedEncoder(nn.Module):
         v_emb = v_emb + t_emb
         
         # 3. Combine
+        # 3. Combine
         if self.mode == 'interleaved':
-            stacked = torch.stack([f_emb, v_emb], dim=2)
-            tokens = stacked.flatten(1, 2)
+            stacked = torch.stack([f_emb, v_emb], dim=2) # (B, N, 2, D)
+            tokens = stacked.flatten(1, 2) # (B, 2N, D)
+            
+            # RoPE Position IDs: Group Feature and Value at same position
+            # ids: (B, N). We want (B, 2N) -> [0, 0, 1, 1, ...]
+            pos_ids = ids.unsqueeze(-1).repeat(1, 1, 2).flatten(1, 2)
         else:
             tokens = f_emb + v_emb
+            pos_ids = ids
             
-        return tokens
+        return tokens, pos_ids
