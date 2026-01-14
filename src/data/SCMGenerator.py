@@ -7,7 +7,7 @@ from typing import List, Optional
 from scipy.special import expit
 
 class SCMGenerator:
-    """
+    r"""
     Structural Causal Model (SCM) Generator for Synthetic Data.
 
     Generates random DAGs and associated data based on a variety of physical mechanisms
@@ -111,8 +111,9 @@ class SCMGenerator:
             return np.random.gumbel(scale=self.noise_scale, size=size)
         elif noise_type == 'cauchy':
             # Cauchy has undefined variance. scale=1.0 is standard.
-            # Clip rigorously later.
-            return np.random.standard_cauchy(size=size) * self.noise_scale
+            # Clip rigorously to avoid extreme outliers
+            raw_cauchy = np.random.standard_cauchy(size=size) * self.noise_scale
+            return np.clip(raw_cauchy, -20.0, 20.0)
         elif noise_type == 'uniform':
             return np.random.uniform(low=-self.noise_scale*1.73, high=self.noise_scale*1.73, size=size)
         else:
@@ -152,21 +153,28 @@ class SCMGenerator:
             for p in parents:
                 func = dag[p][node].get('type', 'linear')
                 pval = data[p].values
-                # Removed: pval = np.clip(pval, -50, 50)
+                
+                # Clip input to prevent overflow in sensitive functions
+                pval_safe = np.clip(pval, -5.0, 5.0) # For exp/pow
+                
                 term = 0
                 if func == 'linear': term = 2.0 * pval
                 elif func == 'negative linear': term = -2.0 * pval
                 elif func == 'sin': term = np.sin(pval)
                 elif func == 'cos': term = np.cos(pval)
-                elif func == 'tan': term = np.tanh(pval)
-                elif func == 'quadratic': term = pval**2
-                elif func == 'cubic': term = pval**3
+                elif func == 'tan': term = np.tanh(pval) # tanh for stability
+                elif func == 'quadratic': term = pval_safe**2
+                elif func == 'cubic': term = pval_safe**3
                 elif func == 'sigmoid': term = expit(pval)
                 elif func == 'step': term = (pval > 0).astype(float)
                 elif func == 'abs': term = np.abs(pval)
+                 # Missing functions implemented:
+                elif func == 'log': term = np.log(np.abs(pval_safe) + 1e-6)
+                elif func == 'exp': term = np.exp(pval_safe)
+                elif func == 'sqrt': term = np.sqrt(np.abs(pval))
                 elif func == 'poly': 
                     # 0.5*x^2 + 0.5*x (Simple polynomial mix)
-                    param = pval
+                    param = pval_safe
                     term = 0.5 * (param**2) + 0.5 * param
                 elif func == 'sawtooth': 
                     # Sawtooth wave: x - floor(x) centered
@@ -175,7 +183,9 @@ class SCMGenerator:
                     # x / (1 + |x|) (Softsign-ish but rational)
                     term = 2.0 * pval / (1.0 + np.abs(pval))
                 else: term = pval # Fallback
-                # Removed: term = np.clip(term, -50, 50)
+                
+                # Clip individual term contribution to avoid single-edge dominance
+                term = np.clip(term, -10.0, 10.0)
                 terms.append(term)
             
             # Combine Terms: Additive vs Multiplicative (Interaction)
@@ -193,8 +203,8 @@ class SCMGenerator:
                 # Standard Additive Model
                 total = noise_term + sum(terms)
             
-            # Removed: data[node] = np.clip(total, -30, 30)
-            data[node] = total
+            # Clip total value to prevent cascade explosion in deep graphs
+            data[node] = np.clip(total, -20.0, 20.0)
         return data, noise
 
     def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True, intervention_scale=1.0, random_noise_type=True):
