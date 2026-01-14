@@ -124,11 +124,12 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 # Forward
                 deltas, logits = model(base, int_s, target, mask)
                 
-                # Compute I-NLL (Negative Log Likelihood) -> Removed in refactor
-                # Just track MSE/MAE
-                
                 mse = (deltas - batch['delta'].to(device))**2
-                
+
+                # Compute NLL (Gaussian Assumption with Unit Variance)
+                nll_val = 0.5 * (mse.mean().item() + 1.837877)
+                total_nll += nll_val
+
                 total_loss += mse.mean().item() 
                 
                 # Compute MAE

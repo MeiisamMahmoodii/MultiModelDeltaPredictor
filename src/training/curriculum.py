@@ -82,10 +82,14 @@ class CurriculumManager:
         params = self.get_current_params()
         n_vars = params['max_vars']
         
-        # Tightened Thresholds for Phase 3
-        if n_vars <= 25: thresh = 8.0   # Was 15
-        elif n_vars <= 35: thresh = 18.0 # Was 25
-        else: thresh = 30.0             # Was 40
+        # Tightened Thresholds for Phase 3 (Normalized Data)
+        # Random guessing on N(0,1) gives MAE ~0.8.
+        # We want to ensure the model is actually predicting deltas well.
+        # Theoretical min is 0.0. Good perf is < 0.2.
+        # We set loose gates to ensure progress but meaningful learning.
+        if n_vars <= 25: thresh = 0.45   # Was 8.0 (Normalized 0.45 implies R2 > 0.5)
+        elif n_vars <= 35: thresh = 0.55 # Was 18.0
+        else: thresh = 0.65             # Was 30.0
         
         if val_mae < thresh:
             # Check benchmarks if provided (Robustness Check)
@@ -94,9 +98,9 @@ class CurriculumManager:
                 min_bench = np.min(benchmark_maes)
                 # If even the "Hard" benchmark is decently solved (e.g. < 2*thresh), allowing leveling.
                 # Or if average performance is good.
-                # Logic: Don't level up if we are completely failing harder tasks (e.g. MAE > 5.0)
+                # Logic: Don't level up if we are completely failing harder tasks (e.g. MAE > 1.0)
                 # This prevents "Local Minima" on easy tasks.
-                if avg_bench > (thresh * 1.5) and avg_bench > 4.0:
+                if avg_bench > (thresh * 1.5) and avg_bench > 1.0:
                     # Too hard, stay here.
                     self.stability_counter = 0 
                     return False, False
