@@ -227,7 +227,11 @@ def main():
     
     device_name = "cpu"
     if torch.cuda.is_available():
-        device_name = f"cuda:{local_rank}"
+        # Safety: If env restricts visible devices (e.g. 1 per proc), local_rank might exceed device_count.
+        # Use modulo to map local_rank to valid device index.
+        # If CUDA_VISIBLE_DEVICES is set by torchrun, device_count is usually 1, so index becomes 0.
+        dev_idx = local_rank % torch.cuda.device_count()
+        device_name = f"cuda:{dev_idx}"
     elif torch.backends.mps.is_available():
         device_name = "mps"
         
