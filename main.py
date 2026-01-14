@@ -29,8 +29,6 @@ except Exception:
 def setup_ddp():
     """Initialize torch.distributed when launched under torchrun."""
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend)
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
         if torch.cuda.is_available():
@@ -38,7 +36,9 @@ def setup_ddp():
             n_devices = torch.cuda.device_count()
             if n_devices > 0:
                 torch.cuda.set_device(local_rank % n_devices)
-        # MPS does not need set_device; handled by torch.device later
+
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
         return local_rank
 
     return 0
