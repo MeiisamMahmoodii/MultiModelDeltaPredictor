@@ -278,7 +278,8 @@ def main():
         print("Moving to DDP...")
         # find_unused_parameters=True is required for Hard MoE (sparse activation).
         # We must solve OOM via Batch Size / Gradient Checkpointing.
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        # FIX: enable DDP with correct device_ids map (handling CUDA_VISIBLE_DEVICES isolation)
+        model = DDP(model, device_ids=[dev_idx], find_unused_parameters=True)
     
     # 2. Data & Curriculum
     curriculum = CurriculumManager(min_vars=args.min_vars, max_vars=args.max_vars)
