@@ -140,9 +140,9 @@ class SimpleMoELayer(nn.Module):
         # 2. Global Synchronization (DDP)
         if torch.distributed.is_initialized():
             # Sync sum of probabilities
-            torch.distributed.all_reduce(local_prob_sum, op=torch.distributed.ReduceOp.SUM)
+            local_prob_sum = differentiable_all_reduce_sum(local_prob_sum)
             # Sync total token count
-            torch.distributed.all_reduce(local_count, op=torch.distributed.ReduceOp.SUM)
+            local_count = differentiable_all_reduce_sum(local_count)
             
         # 3. Compute Global Importance
         global_count = torch.clamp(local_count, min=1.0)
