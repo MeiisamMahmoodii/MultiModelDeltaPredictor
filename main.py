@@ -90,6 +90,7 @@ def evaluate_loader(model, loader, device, description="Validating"):
     model.eval()
     total_loss = 0.0
     total_mae = 0.0
+    total_nll = 0.0
     all_logits = []
     all_adj = []
     num_batches = 0
