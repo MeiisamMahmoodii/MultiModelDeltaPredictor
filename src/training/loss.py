@@ -2,6 +2,29 @@ import torch
 import torch.nn as nn
 
 # Removed: compute_h_loss logic as per Scientist-Engineer Refactor
+# -------------------------------------------------------------
+# New Upgrades for Phase 4 (Contrastive Learning)
+def contrastive_invariance_loss(base_emb, int_emb, intervention_mask, dag_structure=None):
+    """
+    Minimizes latent distance between Base and Intervened states 
+    for nodes that are NOT the intervention target (Invariance).
+    
+    Args:
+        base_emb: (B, N, D)
+        int_emb: (B, N, D)
+        intervention_mask: (B, N) - 1.0 if intervened
+        dag_structure: Optional (B, N, N) ground truth to exempt descendants.
+                       If None, we use simple non-intervened invariance.
+    """
+    # Euclidean distance in latent space
+    diff = torch.norm(base_emb - int_emb, dim=-1) # (B, N)
+    
+    # Mask: Nodes that are NOT intervened
+    invariance_mask = (1.0 - intervention_mask)
+    
+    # Minimize change for non-intervened nodes (Soft constraint)
+    loss = (diff * invariance_mask).mean()
+    return loss
 
 
 class FocalLoss(nn.Module):

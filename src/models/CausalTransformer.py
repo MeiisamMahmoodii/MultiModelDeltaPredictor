@@ -11,9 +11,56 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        norm = torch.mean(x.pow(2), dim=-1, keepdim=True)
-        x_normed = x * torch.rsqrt(norm + self.eps)
-        return self.scale * x_normed
+        return self.scale * x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model, expansion_factor=8/3): # Standard expansion
+        super().__init__()
+        h_dim = int(d_model * expansion_factor)
+        self.w1 = nn.Linear(d_model, h_dim, bias=False) # Gate
+        self.w2 = nn.Linear(d_model, h_dim, bias=False) # Value
+        self.w3 = nn.Linear(h_dim, d_model, bias=False) # Output
+    def forward(self, x):
+        # The "Gate" mechanism controls information flow
+        return self.w3(torch.nn.functional.silu(self.w1(x)) * self.w2(x))
+
+class TopologicalCausalHead(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.query = nn.Linear(d_model, d_model)
+        self.key = nn.Linear(d_model, d_model)
+        
+        # New: Predicts "rank" score. 
+        # High score = Downstream (Leaf), Low score = Upstream (Root)
+        self.ordering_proj = nn.Linear(d_model, 1)
+
+    def forward(self, x):
+        # x: (Batch, N, D)
+        
+        # 1. Content-based Edge Prediction (Standard Attention)
+        Q = self.query(x)
+        K = self.key(x)
+        scale = x.shape[-1]**-0.5
+        content_logits = torch.matmul(Q, K.transpose(-2, -1)) * scale
+        
+        # 2. Ordering Constraint
+        # Predict rank s for each node
+        s = self.ordering_proj(x).squeeze(-1) # (Batch, N)
+        
+        # Compute pairwise difference: s_i - s_j
+        # We want edge i -> j ONLY if i comes before j (rank_i < rank_j)
+        # So we penalize if rank_i > rank_j
+        s_i = s.unsqueeze(2) # (B, N, 1)
+        s_j = s.unsqueeze(1) # (B, 1, N)
+        
+        # This acts as a "Soft Mask".
+        # If (rank_j - rank_i) is positive, allow edge.
+        # If (rank_j - rank_i) is negative (j is before i), suppress edge.
+        ordering_bias = torch.tanh(s_j - s_i) * 5.0 # Scale for sharpness
+        
+        # Final Logits = Content + Ordering
+        # This encourages the model to agree on an order AND the edges
+        return content_logits + ordering_bias
 
 class RoPEAttentionLayer(nn.Module):
     def __init__(self, d_model, nhead, num_experts=8, dropout=0.1):
@@ -31,12 +78,8 @@ class RoPEAttentionLayer(nn.Module):
         # But "Refactor... Implement 2-Stage". 
         # I'll stick to a standard strong FFN to minimize failure surface, unless the user LOVED MoE.
         # The prompt doesn't mention MoE. I will use a standard MLP for stability.
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
-            nn.GELU(),
-            nn.Linear(4 * d_model, d_model),
-            nn.Dropout(dropout)
-        )
+        # Updated to SwiGLU (No bias, no Sequential)
+        self.ffn = SwiGLU(d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, rotary_emb=None, attn_mask=None):
@@ -91,9 +134,9 @@ class CausalTransformer(nn.Module):
         ])
         
         # Structural Head (Predict Adjacency)
-        # We project embeddings to Q and K for adjacency prediction
-        self.dag_query = nn.Linear(d_model, d_model)
-        self.dag_key = nn.Linear(d_model, d_model)
+        # Using TopologicalCausalHead for Acyclicity
+        self.dag_head = TopologicalCausalHead(d_model)
+        # Removed: self.dag_query/key replaced by head class
         
         # 3. Stage 2: The Engineer (Effect Prediction)
         # Deeper, masked by the Scientist's graph
@@ -120,15 +163,9 @@ class CausalTransformer(nn.Module):
         for layer in self.scientist_layers:
             x_sci = layer(x_sci) # No mask, attend to everything
             
-        # Predict Adjacency (B, N, N)
-        # Q_i @ K_j^T
-        Q_dag = self.dag_query(x_sci) # (B, N, D)
-        K_dag = self.dag_key(x_sci)   # (B, N, D)
-        
-        # Similarity scores -> Logits for Edge existence
-        # Scale by 1/sqrt(D) for stability
-        scale = Q_dag.size(-1) ** -0.5
-        adj_logits = torch.matmul(Q_dag, K_dag.transpose(-2, -1)) * scale # (B, N, N)
+        # Predict Adjacency (B, N, N) using Topological Head
+        # Returns logits with ordering constraint applied
+        adj_logits = self.dag_head(x_sci) # (B, N, N)
         
         # ---------------------------------------------------------
         # Stage 2: The Engineer (Predict Physics using Structure)
