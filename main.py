@@ -122,24 +122,17 @@ def evaluate_loader(model, loader, device, description="Validating"):
                 idx = batch['int_node_idx'].to(device)
                 
                 # Forward
-                deltas, logits, adj, log_sigma, _ = model(base, int_s, target, mask)
+                deltas, logits = model(base, int_s, target, mask)
                 
-                # Compute I-NLL (Negative Log Likelihood)
-                # Loss = 0.5 * (exp(-log_sig) * (y - y_hat)^2 + log_sig)
-                # Pytorch GaussianNLLLoss takes var (sigma^2), not log_sigma directly usually, 
-                # but we can implement manually for stability.
-                # Let's assume log_sigma is log(sigma^2) for stability or log(sigma).
-                # Implementation in CausalTransformer was just "Linear(..., 1)". 
-                # Let's interpret output as log(sigma^2).
-                # nll = 0.5 * (torch.exp(-log_sigma) * (deltas - batch['delta'].to(device))**2 + log_sigma)
-                # For metric reporting, we sum it up.
+                # Compute I-NLL (Negative Log Likelihood) -> Removed in refactor
+                # Just track MSE/MAE
                 
                 mse = (deltas - batch['delta'].to(device))**2
-                nll = 0.5 * (torch.exp(-log_sigma) * mse + log_sigma)
                 
-                total_nll += nll.mean().item()
-                total_loss += nll.mean().item() # Track NLL as total loss? Or keep MAE. 
-                # Let's just track NLL separately.
+                total_loss += mse.mean().item() 
+                
+                # Compute MAE
+                total_mae += compute_mae(deltas, batch['delta'].to(device))
                 
                 # Compute MAE
                 total_mae += compute_mae(deltas, batch['delta'].to(device))
@@ -261,13 +254,10 @@ def main():
     model = CausalTransformer(
         num_nodes=args.max_vars + 5, 
         d_model=512,
-        num_layers=args.num_layers,
-        grad_checkpoint=args.grad_checkpoint,
-        ablation_dense=args.ablation_dense_moe,
-        ablation_no_interleaved=args.ablation_no_interleaved,
-        ablation_no_dag=args.ablation_no_dag,
-        ablation_no_physics=args.ablation_no_physics,
-        router_tau=args.router_tau
+        num_layers_scientist=2,
+        num_layers_engineer=max(2, args.num_layers - 2),
+        # Removed unsupported ablation/moe args
+        # grad_checkpoint=args.grad_checkpoint, 
     )
     model.to(device)
     
@@ -277,9 +267,11 @@ def main():
     
     if dist.is_initialized():
         print("Moving to DDP...")
-        # find_unused_parameters=True is required for Hard MoE (sparse activation).
-        # We must solve OOM via Batch Size / Gradient Checkpointing.
-        # FIX: enable DDP with correct device_ids map (handling CUDA_VISIBLE_DEVICES isolation)
+        # find_unused_parameters=False is better if all params used.
+        # Structure Search might have unused params in Engineer if mask blocks everything? No.
+        # But separate heads might cause issues if one not used? 
+        # Scientist always runs. Engineer always runs.
+        # Checkpointing often requires find_unused_parameters=True if implemented weirdly.
         model = DDP(model, device_ids=[dev_idx], find_unused_parameters=True)
     
     # 2. Data & Curriculum
@@ -364,15 +356,8 @@ def main():
         curriculum.load_state_dict(checkpoint['curriculum_state_dict'])
         # ISSUE 19: Duplicate Curriculum Load Removed
         
-        # HOTFIX: Reset Router to break expert collapse from previous phase
-        if is_master:
-            print("Re-initializing MoE Router to break collapse...")
-        with torch.no_grad():
-            # Access router via module if wrapped
-            if hasattr(model, 'module'):
-                router = model.module.moe.router
-            else:
-                router = model.moe.router
+        # Removed MoE Router Reset Logic
+
             
         # ISSUE 4: Always Initialize Router if not resuming (or even if resuming, to break collapse?)
         # User requested: "Re-Initialized on Training Start"
@@ -384,27 +369,8 @@ def main():
             
     # Always ensure Router is initialized properly at start (Fresh)
     # Broadcast weights from Rank 0 to ensure consistency in DDP (since RNG is seeded differently per rank)
-    if not args.resume:
-        if is_master: print("Initializing MoE Routers (Fresh Start)...")
-        
-        # Access layers
-        if hasattr(model, 'module'):
-            transformer_layers = model.module.transformer.layers
-        else:
-            transformer_layers = model.transformer.layers
-            
-        with torch.no_grad():
-            for layer_idx, layer in enumerate(transformer_layers):
-                router = layer.moe.router
-                
-                if is_master:
-                    router.weight.normal_(0, 0.02)
-                    router.bias.zero_()
-                
-                # Broadcast to sync across ranks
-                if dist.is_initialized():
-                    dist.broadcast(router.weight.data, src=0)
-                    dist.broadcast(router.bias.data, src=0)
+    # Removed MoE Initialization Logic
+
 
     for epoch in range(start_epoch, args.epochs):
         # Update Curriculum Stats
@@ -499,13 +465,8 @@ def main():
                 # ASCII Header
                 print(f"Epoch {epoch} Started", flush=True)
 
-        # MOE METRICS RESET (now in each transformer layer)
-        if hasattr(model, 'module'):
-            for layer in model.module.transformer.layers:
-                layer.moe.reset_metrics()
-        else:
-            for layer in model.transformer.layers:
-                layer.moe.reset_metrics()
+        # Removed MoE Reset Logic
+
         
         i = 0 # Safety initialization
         
@@ -519,7 +480,7 @@ def main():
             mask = batch['int_mask'].to(device)
             idx = batch['int_node_idx'].to(device)
             # Forward (Phase 4: Returns deltas, logits, adj, mcm_out, aux_loss)
-            deltas, logits, adj, _, aux_loss = model(base, int_s, target, mask)
+            deltas, logits = model(base, int_s, target, mask)
             
             # Adaptive Weighting (User Request: Curriculum-linked)
             # Level 0 -> lambda_delta=100. Level 30 -> lambda_delta=1.
@@ -538,14 +499,8 @@ def main():
                 loss_type=args.loss_type
             ) 
             
-            # Add Load Balancing Loss with NaN/Inf guard
-            aux_safe = aux_loss
-            if not isinstance(aux_safe, torch.Tensor):
-                aux_safe = torch.tensor(float(aux_safe), device=loss.device)
-            if torch.isnan(aux_safe) or torch.isinf(aux_safe):
-                aux_safe = torch.tensor(0.0, device=loss.device)
-            loss += args.lambda_aux_moe * aux_safe
-            items['aux_moe'] = aux_safe.item()
+            # Removed MoE Aux Loss
+
 
             # REMOVED: Final loss safety guard that was hiding real failures
             # If loss is NaN/Inf, we MUST debug it, not mask it with a constant.
@@ -577,33 +532,12 @@ def main():
             total_metrics['fdr'] += fdr
                 
             if is_master:
-                # Retrieve MoE Metrics (Handle DDP wrapper)
-                # Aggregate metrics across all transformer layers
-                total_entropy = 0.0
-                total_gini = 0.0
-                num_layers = 0
-                
-                if hasattr(model, 'module'):
-                    layers = model.module.transformer.layers
-                else:
-                    layers = model.transformer.layers
-                    
-                for layer in layers:
-                    metrics = layer.moe.get_expert_metrics()
-                    total_entropy += metrics['entropy']
-                    total_gini += metrics['gini']
-                    num_layers += 1
-                
-                avg_entropy = total_entropy / num_layers if num_layers > 0 else 0.0
-                avg_gini = total_gini / num_layers if num_layers > 0 else 0.0
-                
                 avg_loss = total_loss / (i + 1)
                 avg_shd = total_metrics['shd'] / (i + 1)
-                avg_f1 = total_metrics['f1'] / (i + 1)
                 avg_mae = total_metrics['mae'] / (i + 1)
                 avg_delta = total_metrics['delta'] / (i + 1)
-                
-                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f} | Ent: {avg_entropy:.2f} | Gini: {avg_gini:.2f}"
+
+                metric_str = f"L: {avg_loss:.1f} | Δ: {avg_delta:.2f} | MAE: {avg_mae:.2f} | SHD:{avg_shd:.1f}"
                 
                 if RICH_AVAILABLE and progress is not None:
                     progress.update(task_id, advance=1, metrics=metric_str)
@@ -696,26 +630,8 @@ def main():
         # 2. Print Summary (Master Only)
         if is_master:
             # Re-fetch metrics for summary
-            # Retrieve MoE Metrics (Aggregate across layers)
-            total_entropy = 0.0
-            total_gini = 0.0
-            num_layers = 0
-            
-            if hasattr(model, 'module'):
-                layers = model.module.transformer.layers
-            else:
-                layers = model.transformer.layers
-                
-            for layer in layers:
-                metrics = layer.moe.get_expert_metrics()
-                total_entropy += metrics['entropy']
-                total_gini += metrics['gini']
-                num_layers += 1
-            
-            avg_entropy = total_entropy / num_layers if num_layers > 0 else 0.0
-            avg_gini = total_gini / num_layers if num_layers > 0 else 0.0
-            
-            moe_metrics = {'entropy': avg_entropy, 'gini': avg_gini}
+            # Removed MoE metrics aggregation
+            moe_metrics = {'entropy': 0.0, 'gini': 0.0}
 
             if RICH_AVAILABLE:
                 table = Table(title=f"Epoch {epoch} Summary | Level {curriculum.current_level}")
@@ -726,8 +642,8 @@ def main():
                 table.add_row("Total Loss", f"{avg_loss:.4f}", "-")
                 table.add_row("MAE (L1)", f"{total_metrics['mae']/(i+1):.4f}", f"{val_mae:.4f}")
                 table.add_row("SHD", f"{avg_shd:.2f}", f"{val_metrics['shd']:.2f}")
-                table.add_row("Expert Entropy", f"{moe_metrics['entropy']:.4f}", "-")
-                table.add_row("Expert Gini", f"{moe_metrics['gini']:.4f}", "-")
+                # table.add_row("Expert Entropy", f"{moe_metrics['entropy']:.4f}", "-")
+                # table.add_row("Expert Gini", f"{moe_metrics['gini']:.4f}", "-")
                 table.add_row("LR", f"{optimizer.param_groups[0]['lr']:.2e}", "")
                 
                 rprint(table)

@@ -127,7 +127,7 @@ class SCMGenerator:
             noise = self.sample_noise(size=(num_samples, len(nodes)), noise_type=noise_type)
         
         # Safety: Clip noise to prevent numerical issues
-        noise = np.clip(noise, -50, 50)
+        # Removed: noise = np.clip(noise, -50, 50)
         
         data = pd.DataFrame(noise, columns=nodes)
         
@@ -138,7 +138,7 @@ class SCMGenerator:
 
         for node in sorted_nodes:
             if intervention and node in intervention:
-                data[node] = np.clip(intervention[node], -30, 30)
+                data[node] = intervention[node]
                 continue
             
             parents = list(dag.predecessors(node))
@@ -152,23 +152,22 @@ class SCMGenerator:
             for p in parents:
                 func = dag[p][node].get('type', 'linear')
                 pval = data[p].values
-                # Safety: Clip parent values to prevent exponential blowup
-                pval = np.clip(pval, -50, 50)
+                # Removed: pval = np.clip(pval, -50, 50)
                 term = 0
                 if func == 'linear': term = 2.0 * pval
                 elif func == 'negative linear': term = -2.0 * pval
                 elif func == 'sin': term = np.sin(pval)
                 elif func == 'cos': term = np.cos(pval)
                 elif func == 'tan': term = np.tanh(pval)
-                elif func == 'quadratic': term = np.clip(pval, -5, 5)**2
-                elif func == 'cubic': term = np.clip(pval, -3, 3)**3
+                elif func == 'quadratic': term = pval**2
+                elif func == 'cubic': term = pval**3
                 elif func == 'sigmoid': term = expit(pval)
                 elif func == 'step': term = (pval > 0).astype(float)
-                elif func == 'abs': term = np.abs(np.clip(pval, -50, 50))
+                elif func == 'abs': term = np.abs(pval)
                 elif func == 'poly': 
                     # 0.5*x^2 + 0.5*x (Simple polynomial mix)
-                    pval_clipped = np.clip(pval, -10, 10)
-                    term = 0.5 * (pval_clipped**2) + 0.5 * pval_clipped
+                    param = pval
+                    term = 0.5 * (param**2) + 0.5 * param
                 elif func == 'sawtooth': 
                     # Sawtooth wave: x - floor(x) centered
                     term = 2.0 * (pval - np.floor(pval)) - 1.0
@@ -176,8 +175,7 @@ class SCMGenerator:
                     # x / (1 + |x|) (Softsign-ish but rational)
                     term = 2.0 * pval / (1.0 + np.abs(pval))
                 else: term = pval # Fallback
-                # Safety: Clip term to prevent accumulation
-                term = np.clip(term, -50, 50)
+                # Removed: term = np.clip(term, -50, 50)
                 terms.append(term)
             
             # Combine Terms: Additive vs Multiplicative (Interaction)
@@ -188,17 +186,15 @@ class SCMGenerator:
             if len(terms) > 1 and np.random.rand() < 0.3:
                 # Interaction: Product of first two terms + Sum of rest
                 # Represents "Modulation" (e.g. A * B + C)
-                interact = np.clip(terms[0] * terms[1], -50, 50)
+                interact = terms[0] * terms[1]
                 remaining = sum(terms[2:]) if len(terms) > 2 else 0
-                remaining = np.clip(remaining, -50, 50)
                 total = noise_term + (interact + remaining)
             else:
                 # Standard Additive Model
                 total = noise_term + sum(terms)
             
-            # Final clipping to ensure bounded values
-            # Reduced from [-100, 100] to [-20, 20] to prevent NaN in Transformer
-            data[node] = np.clip(total, -30, 30)
+            # Removed: data[node] = np.clip(total, -30, 30)
+            data[node] = total
         return data, noise
 
     def generate_pipeline(self, num_nodes=None, edge_prob=None, num_samples_base=100, num_samples_per_intervention=100, intervention_prob=None, as_torch=True, use_twin_world=True, intervention_scale=1.0, random_noise_type=True):
@@ -255,10 +251,10 @@ class SCMGenerator:
             sigma = float(base_stds[t]) if hasattr(base_stds, '__getitem__') else float(base_stds)
             if sigma < 1e-4: sigma = 1.0 # Safety fallback for constant/zero-var nodes
             
-            # Intervene at ±1σ and ±2σ, scaled by the curriculum difficulty (intervention_scale)
-            # If intervention_scale=1.0, we test "Standard" shifts (1-2 sigmas).
-            # If intervention_scale=50.0, we test "Extreme" shifts (50-100 sigmas).
-            coeffs = [-2.0, -1.0, 1.0, 2.0] 
+            # Intervene at ±2σ, scaled by the curriculum difficulty (intervention_scale)
+            # The prompt requested: [-2*sigma, +2*sigma] (dynamic)
+            # We will use exactly that.
+            coeffs = [-2.0, 2.0]
             loop_values = [c * sigma * intervention_scale for c in coeffs]
             for val in loop_values:
                 # Intervened Data using SAME Global Noise (Twin World) OR Random Noise (Ablation)
@@ -274,11 +270,48 @@ class SCMGenerator:
                 all_dfs.append(df_int)
                 all_masks.append(mask)
         
+        # ---------------------------------------------------------
+        # Z-Score Normalization (Global)
+        # ---------------------------------------------------------
+        # We need to normalize EVERYTHING (Base samples and Intervention samples)
+        # using the statistics of the Generated Batch (or just Base if we treat it as "True" dist).
+        # Prompt says: "calculate the Global Mean and Std of the entire generated batch (base + interventions)"
+        
+        # 1. Collect all data to compute stats
+        # all_dfs contains [df_base, df_int1, df_int2...]
+        combined_data = pd.concat(all_dfs, axis=0) # (Total_Samples, N)
+        
+        # Compute Mean and Std
+        global_mean = combined_data.mean()
+        global_std = combined_data.std()
+        
+        # Avoid division by zero
+        global_std = global_std.replace(0, 1.0)
+        
+        # Normalize
+        # We apply this to df_base and all intervention DFs
+        
+        df_base_norm = (df_base - global_mean) / global_std
+        
+        all_dfs_norm = []
+        for df in all_dfs:
+            if df is None: 
+                all_dfs_norm.append(None)
+                continue
+            df_norm = (df - global_mean) / global_std
+            all_dfs_norm.append(df_norm)
+        
+        # Update result with normalized tensors
+        if as_torch:
+            base_tensor = torch.tensor(df_base_norm.values, dtype=torch.float32)
+        else:
+            base_tensor = df_base_norm
+            
         result = {
             "dag": dag,
-            "base_tensor": torch.tensor(df_base.values, dtype=torch.float32) if as_torch else df_base,
-            # We return lists of DFs. Dataset will collate them.
-            "all_dfs": all_dfs, 
-            "all_masks": all_masks
+            "base_tensor": base_tensor, 
+            "all_dfs": all_dfs_norm, 
+            "all_masks": all_masks,
+            "stats": {"mean": global_mean, "std": global_std}
         }
         return result

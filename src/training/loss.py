@@ -1,40 +1,8 @@
 import torch
 import torch.nn as nn
 
-def compute_h_loss(adj_matrix):
-    """
-    Computes DAGness (Acyclicity) constraint.
-    Input: (B, N, N) or (N, N)
-    Output: Scalar H-score (mean over batch if batched)
-    """
-    if len(adj_matrix.shape) == 3:
-        # Batched: Compute Per-Sample H-Loss to avoid "Average Graph" bias
-        # Batch size is small (1-4), so iteration is acceptable and exact.
-        h_sum = 0.0
-        B = adj_matrix.shape[0]
-        for i in range(B):
-            h_sum += _h_loss_single(adj_matrix[i])
-        return h_sum / B
-    else:
-        return _h_loss_single(adj_matrix)
+# Removed: compute_h_loss logic as per Scientist-Engineer Refactor
 
-def _h_loss_single(adj_matrix):
-    N = adj_matrix.shape[-1]
-    if adj_matrix.device.type == 'mps':
-        A_sq = (adj_matrix * adj_matrix).cpu()
-        h = torch.trace(torch.matrix_exp(A_sq)) - N
-        h_val = h.to(adj_matrix.device)
-    else:
-        # Polynomial approximation is safer for gradients? 
-        # But standard NO-TEARS uses matrix_exp.
-        A_sq = adj_matrix * adj_matrix
-        h = torch.trace(torch.matrix_exp(A_sq)) - N
-        h_val = h
-    
-    # Safety
-    if (h_val != h_val) or (h_val.abs() > 1e6):
-        return torch.tensor(0.0, device=adj_matrix.device, dtype=adj_matrix.dtype)
-    return h_val
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
@@ -55,7 +23,10 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
                    lambda_delta=100.0, lambda_dag=0.0, lambda_h=0.0, lambda_l1=0.0,
                    loss_type='bce'): # Added loss_type
     
-    loss_delta = nn.functional.l1_loss(pred_delta, true_delta)
+
+    
+    # Robust Regression: Huber Loss
+    loss_delta = nn.functional.huber_loss(pred_delta, true_delta, delta=1.0)
     
     # Removed: Loss clamping that was hiding real failures
     
@@ -101,7 +72,9 @@ def causal_loss_fn(pred_delta, true_delta, pred_adj, true_adj,
     loss_h = torch.tensor(0.0, device=pred_adj.device, dtype=pred_adj.dtype)
     if lambda_h > 0:
         # Exact Per-Sample H-Loss (No consensus bias)
-        loss_h = compute_h_loss(adj_prob)
+        # Exact Per-Sample H-Loss (No consensus bias)
+        # loss_h = compute_h_loss(adj_prob)
+        loss_h = torch.tensor(0.0, device=pred_adj.device) # Disabled
         
         # Removed: Loss clamping that was hiding real failures
 
