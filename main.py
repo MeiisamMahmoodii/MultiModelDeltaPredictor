@@ -652,13 +652,14 @@ def main():
         
         # 1. Update Curriculum (using VALIDATION Scores)
         # ISSUE 11: Sync Metrics across ranks to prevent Curriculum divergence
-        if dist.is_initialized():
-             # Stack metrics [mae, f1]
-             local_metrics = torch.tensor([val_mae, val_f1], device=device)
-             dist.all_reduce(local_metrics, op=dist.ReduceOp.SUM) # Sum across ranks
-             local_metrics /= dist.get_world_size() # Average
-             val_mae = local_metrics[0].item()
-             val_f1 = local_metrics[1].item()
+        with torch.no_grad():
+            if dist.is_initialized():
+                 # Stack metrics [mae, f1]
+                 local_metrics = torch.tensor([val_mae, val_f1], device=device)
+                 dist.all_reduce(local_metrics, op=dist.ReduceOp.SUM) # Sum across ranks
+                 local_metrics /= dist.get_world_size() # Average
+                 val_mae = local_metrics[0].item()
+                 val_f1 = local_metrics[1].item()
         
         # FIX: Run benchmarks on ALL RANKS (silently for slaves).
         
@@ -678,15 +679,17 @@ def main():
             b_metrics = evaluate_loader(model, b_loader, device, description=level_name if is_master else "")
             
             # Sync Benchmark MAE too
-            b_mae = torch.tensor(b_metrics['mae'], device=device)
-            if dist.is_initialized():
-                 dist.all_reduce(b_mae, op=dist.ReduceOp.SUM)
-                 b_mae /= dist.get_world_size()
+            with torch.no_grad():
+                b_mae = torch.tensor(b_metrics['mae'], device=device)
+                if dist.is_initialized():
+                     dist.all_reduce(b_mae, op=dist.ReduceOp.SUM)
+                     b_mae /= dist.get_world_size()
+                b_mae_val = b_mae.item()
             
-            benchmark_maes.append(b_mae.item())
+            benchmark_maes.append(b_mae_val)
             
             if is_master:
-                print(f"[{level_name.upper()}] MAE: {b_mae.item():.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
+                print(f"[{level_name.upper()}] MAE: {b_mae_val:.3f} | SHD: {b_metrics['shd']:.1f} | F1: {b_metrics['f1']:.3f}")
 
         leveled_up, reset_lr = curriculum.update(val_mae, val_f1, benchmark_maes)
         
